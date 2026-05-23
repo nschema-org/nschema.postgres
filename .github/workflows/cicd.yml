@@ -16,9 +16,17 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
+      - name: Check out build pipeline
+        uses: actions/checkout@v6
+        with:
+          repository: 'nschema-org/NSchema'
+          path: 'build'
+
       - name: Run Build Pipeline
-        run: dotnet run --project build/NSchema.Build/NSchema.Build.csproj -- build
+        run: dotnet run --project .build/build/NSchema.Build/NSchema.Build.csproj -- build
         shell: bash
+        env:
+          Build__ProjectFile: 'src/NSchema.Postgres/NSchema.Postgres.csproj'
 
   deploy:
     name: Deploy
@@ -29,8 +37,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
+      - name: Check out build pipeline
+        uses: actions/checkout@v6
+        with:
+          repository: 'nschema-org/NSchema'
+          path: 'build'
+
       - name: Run Deploy Pipeline
         run: dotnet run --project build/NSchema.Build/NSchema.Build.csproj -- deploy
         shell: bash
         env:
           Build__NuGetApiKey: ${{ secrets.NUGET_API_KEY }}
+          Build__ProjectFile: 'src/NSchema.Postgres/NSchema.Postgres.csproj'
