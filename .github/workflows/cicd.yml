@@ -23,7 +23,7 @@ jobs:
           path: 'build'
 
       - name: Run Build Pipeline
-        run: dotnet run --project .build/build/NSchema.Build/NSchema.Build.csproj -- build
+        run: dotnet run --project build/build/NSchema.Build/NSchema.Build.csproj -- build
         shell: bash
         env:
           Build__ProjectFile: 'src/NSchema.Postgres/NSchema.Postgres.csproj'
