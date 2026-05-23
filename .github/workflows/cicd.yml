@@ -44,7 +44,7 @@ jobs:
           path: 'build'
 
       - name: Run Deploy Pipeline
-        run: dotnet run --project build/NSchema.Build/NSchema.Build.csproj -- deploy
+        run: dotnet run --project build/build/NSchema.Build/NSchema.Build.csproj -- deploy
         shell: bash
         env:
           Build__NuGetApiKey: ${{ secrets.NUGET_API_KEY }}
