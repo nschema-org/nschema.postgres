@@ -14,8 +14,7 @@ internal sealed class PostgresSqlPlanner : ISqlPlanner
 
     private static SqlStatement ToStatement(MigrationAction action) => action switch
     {
-        RunPreDeploymentScript x => new SqlStatement(x.Script.Sql, x.Script.RunOutsideTransaction),
-        RunPostDeploymentScript x => new SqlStatement(x.Script.Sql, x.Script.RunOutsideTransaction),
+        RunScript x => new SqlStatement(x.Script.Sql, x.Script.RunOutsideTransaction),
         _ => new SqlStatement(GenerateSql(action)),
     };
 
@@ -60,8 +59,7 @@ internal sealed class PostgresSqlPlanner : ISqlPlanner
         RevokeSchemaUsage x => $"""REVOKE USAGE ON SCHEMA "{x.SchemaName}" FROM {x.Role}""",
         GrantTablePrivileges x => $"""GRANT {PrivilegeList(x.Privileges)} ON TABLE "{x.SchemaName}"."{x.TableName}" TO {x.Role}""",
         RevokeTablePrivileges x => $"""REVOKE ALL PRIVILEGES ON TABLE "{x.SchemaName}"."{x.TableName}" FROM {x.Role}""",
-        RunPreDeploymentScript x => x.Script.Sql,
-        RunPostDeploymentScript x => x.Script.Sql,
+        RunScript x => x.Script.Sql,
         _ => throw new ArgumentOutOfRangeException(nameof(action), $"Unhandled action type: {action.GetType().Name}")
     };
 
