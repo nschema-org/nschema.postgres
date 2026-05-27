@@ -1,15 +1,22 @@
 using Npgsql;
+using NpgsqlTypes;
 using NSchema.Migration;
 using NSchema.Postgres.Models;
 using NSchema.Schema;
 
 namespace NSchema.Postgres.Migration;
 
-internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ICurrentSchemaProvider
+internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISchemaProvider
 {
-    public async Task<DatabaseSchema> GetSchema(string[] schemas, CancellationToken cancellationToken = default)
+    public async Task<DatabaseSchema> GetSchema(string[]? schemas = null, CancellationToken cancellationToken = default)
     {
         await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
+
+        // Treat empty as "all visible schemas" the same as null.
+        if (schemas is { Length: 0 })
+        {
+            schemas = null;
+        }
 
         var tables = await QueryTables(conn, schemas, cancellationToken);
         var columns = await QueryColumns(conn, schemas, cancellationToken);
@@ -32,7 +39,13 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ICur
 
     // ── Queries ───────────────────────────────────────────────────────────────
 
-    private static async Task<List<TableRow>> QueryTables(NpgsqlConnection conn, string[] schemes, CancellationToken ct)
+    private static void AddSchemasParameter(NpgsqlCommand cmd, string[]? schemas)
+    {
+        var parameter = cmd.Parameters.Add("schemas", NpgsqlDbType.Array | NpgsqlDbType.Text);
+        parameter.Value = (object?)schemas ?? DBNull.Value;
+    }
+
+    private static async Task<List<TableRow>> QueryTables(NpgsqlConnection conn, string[]? schemas, CancellationToken ct)
     {
         var rows = new List<TableRow>();
         await using var cmd = conn.CreateCommand();
@@ -40,10 +53,13 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ICur
             SELECT table_schema, table_name
             FROM information_schema.tables
             WHERE table_type = 'BASE TABLE'
-            AND table_schema = ANY(@schemas)
+            AND (@schemas::text[] IS NULL OR table_schema = ANY(@schemas))
+            AND table_schema NOT IN ('pg_catalog', 'information_schema')
+            AND table_schema NOT LIKE 'pg\_toast%' ESCAPE '\'
+            AND table_schema NOT LIKE 'pg\_temp%' ESCAPE '\'
             ORDER BY table_schema, table_name
             """;
-        cmd.Parameters.AddWithValue("schemas", schemes);
+        AddSchemasParameter(cmd, schemas);
 
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
@@ -54,7 +70,7 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ICur
         return rows;
     }
 
-    private static async Task<List<ColumnRow>> QueryColumns(NpgsqlConnection conn, string[] schemes, CancellationToken ct)
+    private static async Task<List<ColumnRow>> QueryColumns(NpgsqlConnection conn, string[]? schemas, CancellationToken ct)
     {
         var rows = new List<ColumnRow>();
         await using var cmd = conn.CreateCommand();
@@ -89,10 +105,13 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ICur
             LEFT JOIN pg_class        sc ON sc.oid       = d.objid
                                         AND sc.relkind  = 'S'
             LEFT JOIN pg_sequence     seq ON seq.seqrelid = sc.oid
-            WHERE c.table_schema = ANY(@schemas)
+            WHERE (@schemas::text[] IS NULL OR c.table_schema = ANY(@schemas))
+            AND c.table_schema NOT IN ('pg_catalog', 'information_schema')
+            AND c.table_schema NOT LIKE 'pg\_toast%' ESCAPE '\'
+            AND c.table_schema NOT LIKE 'pg\_temp%' ESCAPE '\'
             ORDER BY c.table_schema, c.table_name, c.ordinal_position
             """;
-        cmd.Parameters.AddWithValue("schemas", schemes);
+        AddSchemasParameter(cmd, schemas);
 
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
@@ -120,7 +139,7 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ICur
         return rows;
     }
 
-    private static async Task<List<PrimaryKeyRow>> QueryPrimaryKeys(NpgsqlConnection conn, string[] schemes, CancellationToken ct)
+    private static async Task<List<PrimaryKeyRow>> QueryPrimaryKeys(NpgsqlConnection conn, string[]? schemas, CancellationToken ct)
     {
         var rows = new List<PrimaryKeyRow>();
         await using var cmd = conn.CreateCommand();
@@ -136,10 +155,13 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ICur
                 AND tc.table_schema    = kcu.table_schema
                 AND tc.table_name      = kcu.table_name
             WHERE tc.constraint_type = 'PRIMARY KEY'
-            AND tc.table_schema = ANY(@schemas)
+            AND (@schemas::text[] IS NULL OR tc.table_schema = ANY(@schemas))
+            AND tc.table_schema NOT IN ('pg_catalog', 'information_schema')
+            AND tc.table_schema NOT LIKE 'pg\_toast%' ESCAPE '\'
+            AND tc.table_schema NOT LIKE 'pg\_temp%' ESCAPE '\'
             ORDER BY tc.table_schema, tc.table_name, kcu.ordinal_position
             """;
-        cmd.Parameters.AddWithValue("schemas", schemes);
+        AddSchemasParameter(cmd, schemas);
 
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
@@ -155,7 +177,7 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ICur
         return rows;
     }
 
-    private static async Task<List<ForeignKeyRow>> QueryForeignKeys(NpgsqlConnection conn, string[] schemes, CancellationToken ct)
+    private static async Task<List<ForeignKeyRow>> QueryForeignKeys(NpgsqlConnection conn, string[]? schemas, CancellationToken ct)
     {
         var rows = new List<ForeignKeyRow>();
         await using var cmd = conn.CreateCommand();
@@ -180,11 +202,14 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ICur
             JOIN pg_attribute a  ON a.attrelid = t.oid  AND a.attnum = ANY(c.conkey)
             JOIN pg_attribute fa ON fa.attrelid = ft.oid AND fa.attnum = ANY(c.confkey)
             WHERE c.contype = 'f'
-            AND n.nspname = ANY(@schemas)
+            AND (@schemas::text[] IS NULL OR n.nspname = ANY(@schemas))
+            AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+            AND n.nspname NOT LIKE 'pg\_toast%' ESCAPE '\'
+            AND n.nspname NOT LIKE 'pg\_temp%' ESCAPE '\'
             GROUP BY n.nspname, t.relname, c.conname, fn.nspname, ft.relname, c.confupdtype, c.confdeltype
             ORDER BY n.nspname, t.relname, c.conname
             """;
-        cmd.Parameters.AddWithValue("schemas", schemes);
+        AddSchemasParameter(cmd, schemas);
 
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
@@ -205,7 +230,7 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ICur
         return rows;
     }
 
-    private static async Task<List<IndexRow>> QueryIndexes(NpgsqlConnection conn, string[] schemes, CancellationToken ct)
+    private static async Task<List<IndexRow>> QueryIndexes(NpgsqlConnection conn, string[]? schemas, CancellationToken ct)
     {
         var rows = new List<IndexRow>();
         await using var cmd = conn.CreateCommand();
@@ -225,13 +250,16 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ICur
             JOIN pg_namespace n ON n.oid = t.relnamespace
             JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS k(attnum, ordinality) ON TRUE
             JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
-            WHERE n.nspname = ANY(@schemas)
+            WHERE (@schemas::text[] IS NULL OR n.nspname = ANY(@schemas))
+            AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+            AND n.nspname NOT LIKE 'pg\_toast%' ESCAPE '\'
+            AND n.nspname NOT LIKE 'pg\_temp%' ESCAPE '\'
             AND NOT ix.indisprimary
             AND k.attnum > 0
             GROUP BY n.nspname, t.relname, i.relname, ix.indisunique, ix.indpred, ix.indrelid
             ORDER BY n.nspname, t.relname, i.relname
             """;
-        cmd.Parameters.AddWithValue("schemas", schemes);
+        AddSchemasParameter(cmd, schemas);
 
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
@@ -249,7 +277,7 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ICur
         return rows;
     }
 
-    private static async Task<Dictionary<string, string?>> QuerySchemaComments(NpgsqlConnection conn, string[] schemas, CancellationToken ct)
+    private static async Task<Dictionary<string, string?>> QuerySchemaComments(NpgsqlConnection conn, string[]? schemas, CancellationToken ct)
     {
         var result = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
         await using var cmd = conn.CreateCommand();
@@ -260,9 +288,12 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ICur
                 ON d.objoid = n.oid
                 AND d.classoid = 'pg_namespace'::regclass
                 AND d.objsubid = 0
-            WHERE n.nspname = ANY(@schemas)
+            WHERE (@schemas::text[] IS NULL OR n.nspname = ANY(@schemas))
+            AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+            AND n.nspname NOT LIKE 'pg\_toast%' ESCAPE '\'
+            AND n.nspname NOT LIKE 'pg\_temp%' ESCAPE '\'
             """;
-        cmd.Parameters.AddWithValue("schemas", schemas);
+        AddSchemasParameter(cmd, schemas);
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
@@ -272,7 +303,7 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ICur
         return result;
     }
 
-    private static async Task<Dictionary<(string, string), string?>> QueryTableComments(NpgsqlConnection conn, string[] schemas, CancellationToken ct)
+    private static async Task<Dictionary<(string, string), string?>> QueryTableComments(NpgsqlConnection conn, string[]? schemas, CancellationToken ct)
     {
         var result = new Dictionary<(string, string), string?>();
         await using var cmd = conn.CreateCommand();
@@ -284,11 +315,14 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ICur
                 ON d.objoid = c.oid
                 AND d.classoid = 'pg_class'::regclass
                 AND d.objsubid = 0
-            WHERE n.nspname = ANY(@schemas)
+            WHERE (@schemas::text[] IS NULL OR n.nspname = ANY(@schemas))
+            AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+            AND n.nspname NOT LIKE 'pg\_toast%' ESCAPE '\'
+            AND n.nspname NOT LIKE 'pg\_temp%' ESCAPE '\'
             AND c.relkind = 'r'
             ORDER BY n.nspname, c.relname
             """;
-        cmd.Parameters.AddWithValue("schemas", schemas);
+        AddSchemasParameter(cmd, schemas);
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
@@ -298,7 +332,7 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ICur
         return result;
     }
 
-    private static async Task<Dictionary<(string, string, string), string?>> QueryColumnComments(NpgsqlConnection conn, string[] schemas, CancellationToken ct)
+    private static async Task<Dictionary<(string, string, string), string?>> QueryColumnComments(NpgsqlConnection conn, string[]? schemas, CancellationToken ct)
     {
         var result = new Dictionary<(string, string, string), string?>();
         await using var cmd = conn.CreateCommand();
@@ -311,11 +345,14 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ICur
                 ON d.objoid = c.oid
                 AND d.classoid = 'pg_class'::regclass
                 AND d.objsubid = a.attnum
-            WHERE n.nspname = ANY(@schemas)
+            WHERE (@schemas::text[] IS NULL OR n.nspname = ANY(@schemas))
+            AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+            AND n.nspname NOT LIKE 'pg\_toast%' ESCAPE '\'
+            AND n.nspname NOT LIKE 'pg\_temp%' ESCAPE '\'
             AND c.relkind = 'r'
             ORDER BY n.nspname, c.relname, a.attnum
             """;
-        cmd.Parameters.AddWithValue("schemas", schemas);
+        AddSchemasParameter(cmd, schemas);
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
@@ -325,7 +362,7 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ICur
         return result;
     }
 
-    private static async Task<Dictionary<(string, string), string?>> QueryIndexComments(NpgsqlConnection conn, string[] schemas, CancellationToken ct)
+    private static async Task<Dictionary<(string, string), string?>> QueryIndexComments(NpgsqlConnection conn, string[]? schemas, CancellationToken ct)
     {
         var result = new Dictionary<(string, string), string?>();
         await using var cmd = conn.CreateCommand();
@@ -339,11 +376,14 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ICur
                 ON d.objoid = i.oid
                 AND d.classoid = 'pg_class'::regclass
                 AND d.objsubid = 0
-            WHERE n.nspname = ANY(@schemas)
+            WHERE (@schemas::text[] IS NULL OR n.nspname = ANY(@schemas))
+            AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+            AND n.nspname NOT LIKE 'pg\_toast%' ESCAPE '\'
+            AND n.nspname NOT LIKE 'pg\_temp%' ESCAPE '\'
             AND NOT ix.indisprimary
             ORDER BY n.nspname, i.relname
             """;
-        cmd.Parameters.AddWithValue("schemas", schemas);
+        AddSchemasParameter(cmd, schemas);
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
@@ -353,7 +393,7 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ICur
         return result;
     }
 
-    private static async Task<List<SchemaGrantRow>> QuerySchemaGrants(NpgsqlConnection conn, string[] schemas, CancellationToken ct)
+    private static async Task<List<SchemaGrantRow>> QuerySchemaGrants(NpgsqlConnection conn, string[]? schemas, CancellationToken ct)
     {
         var rows = new List<SchemaGrantRow>();
         await using var cmd = conn.CreateCommand();
@@ -362,11 +402,14 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ICur
                    acl.grantee::regrole::text AS role
             FROM pg_namespace n
             CROSS JOIN LATERAL aclexplode(n.nspacl) AS acl(grantor, grantee, privilege_type, is_grantable)
-            WHERE n.nspname = ANY(@schemas)
+            WHERE (@schemas::text[] IS NULL OR n.nspname = ANY(@schemas))
+            AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+            AND n.nspname NOT LIKE 'pg\_toast%' ESCAPE '\'
+            AND n.nspname NOT LIKE 'pg\_temp%' ESCAPE '\'
             AND acl.privilege_type = 'USAGE'
             AND acl.grantee != 0
             """;
-        cmd.Parameters.AddWithValue("schemas", schemas);
+        AddSchemasParameter(cmd, schemas);
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
@@ -376,19 +419,22 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ICur
         return rows;
     }
 
-    private static async Task<List<TableGrantRow>> QueryTableGrants(NpgsqlConnection conn, string[] schemas, CancellationToken ct)
+    private static async Task<List<TableGrantRow>> QueryTableGrants(NpgsqlConnection conn, string[]? schemas, CancellationToken ct)
     {
         var rows = new List<TableGrantRow>();
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
             SELECT table_schema, table_name, grantee, privilege_type
             FROM information_schema.role_table_grants
-            WHERE table_schema = ANY(@schemas)
+            WHERE (@schemas::text[] IS NULL OR table_schema = ANY(@schemas))
+            AND table_schema NOT IN ('pg_catalog', 'information_schema')
+            AND table_schema NOT LIKE 'pg\_toast%' ESCAPE '\'
+            AND table_schema NOT LIKE 'pg\_temp%' ESCAPE '\'
             AND privilege_type IN ('SELECT', 'INSERT', 'UPDATE', 'DELETE')
             AND grantee != 'PUBLIC'
             ORDER BY table_schema, table_name, grantee, privilege_type
             """;
-        cmd.Parameters.AddWithValue("schemas", schemas);
+        AddSchemasParameter(cmd, schemas);
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
@@ -511,23 +557,23 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ICur
 
         return dataType switch
         {
-        "boolean" => SqlType.Boolean,
-        "smallint" => SqlType.SmallInt,
-        "integer" => SqlType.Int,
-        "bigint" => SqlType.BigInt,
-        "real" => SqlType.Float,
-        "double precision" => SqlType.Double,
-        "numeric" => SqlType.Decimal(precision ?? 18, scale ?? 0),
-        "character" => SqlType.Char(maxLength ?? 1),
-        "character varying" => SqlType.VarChar(maxLength),
-        "text" => SqlType.Text,
-        "date" => SqlType.Date,
-        "time without time zone" => SqlType.Time,
-        "timestamp without time zone" => SqlType.DateTime,
-        "timestamp with time zone" => SqlType.DateTimeOffset,
-        "uuid" => SqlType.Guid,
-        "bytea" => SqlType.VarBinary(),
-        _ => SqlType.Custom(udtName),
+            "boolean" => SqlType.Boolean,
+            "smallint" => SqlType.SmallInt,
+            "integer" => SqlType.Int,
+            "bigint" => SqlType.BigInt,
+            "real" => SqlType.Float,
+            "double precision" => SqlType.Double,
+            "numeric" => SqlType.Decimal(precision ?? 18, scale ?? 0),
+            "character" => SqlType.Char(maxLength ?? 1),
+            "character varying" => SqlType.VarChar(maxLength),
+            "text" => SqlType.Text,
+            "date" => SqlType.Date,
+            "time without time zone" => SqlType.Time,
+            "timestamp without time zone" => SqlType.DateTime,
+            "timestamp with time zone" => SqlType.DateTimeOffset,
+            "uuid" => SqlType.Guid,
+            "bytea" => SqlType.VarBinary(),
+            _ => SqlType.Custom(udtName),
         };
     }
 

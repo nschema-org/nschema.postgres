@@ -400,13 +400,13 @@ public sealed class PostgresSqlPlannerTests(PostgresContainerFixture fixture) : 
     // ── Deployment scripts ────────────────────────────────────────────────────
 
     [Fact]
-    public async Task RunPreDeploymentScript_ExecutesSql()
+    public async Task RunScript_PreDeployment_ExecutesSql()
     {
         // Arrange
-        var script = new Script("seed", $"""CREATE TABLE "{_schema}"."seeded" (id integer)""");
+        var script = new Script("seed", $"""CREATE TABLE "{_schema}"."seeded" (id integer)""", ScriptType.PreDeployment);
 
         // Act
-        await _executor.Execute(_planner.Plan(new MigrationPlan([new RunPreDeploymentScript(script)])));
+        await _executor.Execute(_planner.Plan(new MigrationPlan([new RunScript(script)])));
 
         // Assert
         var exists = await ScalarBool(
@@ -415,13 +415,13 @@ public sealed class PostgresSqlPlannerTests(PostgresContainerFixture fixture) : 
     }
 
     [Fact]
-    public async Task RunPostDeploymentScript_ExecutesSql()
+    public async Task RunScript_PostDeployment_ExecutesSql()
     {
         // Arrange
-        var script = new Script("seed", $"""CREATE TABLE "{_schema}"."seeded_post" (id integer)""");
+        var script = new Script("seed", $"""CREATE TABLE "{_schema}"."seeded_post" (id integer)""", ScriptType.PostDeployment);
 
         // Act
-        await _executor.Execute(_planner.Plan(new MigrationPlan([new RunPostDeploymentScript(script)])));
+        await _executor.Execute(_planner.Plan(new MigrationPlan([new RunScript(script)])));
 
         // Assert
         var exists = await ScalarBool(
@@ -440,11 +440,11 @@ public sealed class PostgresSqlPlannerTests(PostgresContainerFixture fixture) : 
         var planActions = new MigrationAction[]
         {
             new CreateTable(_schema, goodTable),
-            new RunPostDeploymentScript(new Script("boom", "SELECT * FROM does_not_exist_xyz")),
+            new RunScript(new Script("boom", "SELECT * FROM does_not_exist_xyz", ScriptType.PostDeployment)),
         };
 
         // Act
-        await Should.ThrowAsync<Npgsql.PostgresException>(() =>
+        await Should.ThrowAsync<PostgresException>(() =>
             _executor.Execute(_planner.Plan(new MigrationPlan(planActions))));
 
         // Assert — the create from earlier in the plan should have been rolled back.
@@ -457,18 +457,18 @@ public sealed class PostgresSqlPlannerTests(PostgresContainerFixture fixture) : 
     public async Task Execute_ScriptMarkedRunOutsideTransaction_CommitsIndependentlyOfLaterFailure()
     {
         // Arrange — a pre-deployment script with RunOutsideTransaction=true, followed by a failing action.
-        var preScript = new Script("seed_outside", $"""CREATE TABLE "{_schema}"."outside_tx" (id integer)""")
+        var preScript = new Script("seed_outside", $"""CREATE TABLE "{_schema}"."outside_tx" (id integer)""", ScriptType.PreDeployment)
         {
             RunOutsideTransaction = true,
         };
         var planActions = new MigrationAction[]
         {
-            new RunPreDeploymentScript(preScript),
-            new RunPostDeploymentScript(new Script("boom", "SELECT * FROM does_not_exist_xyz")),
+            new RunScript(preScript),
+            new RunScript(new Script("boom", "SELECT * FROM does_not_exist_xyz", ScriptType.PostDeployment)),
         };
 
         // Act
-        await Should.ThrowAsync<Npgsql.PostgresException>(() =>
+        await Should.ThrowAsync<PostgresException>(() =>
             _executor.Execute(_planner.Plan(new MigrationPlan(planActions))));
 
         // Assert — the out-of-tx script committed before the failure, so its table survives.

@@ -49,13 +49,8 @@ public static class NSchemaApplicationBuilderExtensions
         /// Configures NSchema to use PostgreSQL as the database provider by registering the necessary services for schema management and SQL planning specific to PostgreSQL.
         /// </summary>
         /// <returns>The <see cref="NSchemaApplicationBuilder"/> instance, allowing for method chaining.</returns>
-        public NSchemaApplicationBuilder UsePostgres()
-        {
-            builder.Services
-                .AddSingleton<ICurrentSchemaProvider, PostgresSchemaProvider>()
-                .AddSingleton<ISqlPlanner, PostgresSqlPlanner>();
-
-            return builder;
-        }
+        public NSchemaApplicationBuilder UsePostgres() => builder
+            .UseSchemaSource<PostgresSchemaProvider>()
+            .UseSqlPlanner<PostgresSqlPlanner>();
     }
 }
