@@ -1,6 +1,5 @@
 using Microsoft.Extensions.DependencyInjection;
 using Npgsql;
-using NSchema.Migration;
 using NSchema.Postgres.Migration;
 
 namespace NSchema.Postgres;
@@ -50,7 +49,7 @@ public static class NSchemaApplicationBuilderExtensions
         /// </summary>
         /// <returns>The <see cref="NSchemaApplicationBuilder"/> instance, allowing for method chaining.</returns>
         public NSchemaApplicationBuilder UsePostgres() => builder
-            .UseSchemaSource<PostgresSchemaProvider>()
+            .UseCurrentSchema<PostgresSchemaProvider>()
             .UseSqlPlanner<PostgresSqlPlanner>();
     }
 }
