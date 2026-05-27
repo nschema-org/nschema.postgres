@@ -7,19 +7,25 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
-    <Copyright>2026</Copyright>
+    <Authors>Tom Wolfe</Authors>
+    <Copyright>Copyright © 2026 Tom Wolfe</Copyright>
     <PackageId>NSchema.Postgres</PackageId>
-    <PackageProjectUrl>https://github.com/tom-wolfe/NSchema</PackageProjectUrl>
+    <PackageProjectUrl>https://github.com/tom-wolfe/NSchema.Postgres</PackageProjectUrl>
     <PackageReadmeFile>README.md</PackageReadmeFile>
-    <LicenseExpression>MIT</LicenseExpression>
+    <PackageIcon>icon.png</PackageIcon>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <RepositoryUrl>https://github.com/tom-wolfe/NSchema.git</RepositoryUrl>
+    <RepositoryUrl>https://github.com/tom-wolfe/NSchema.Postgres.git</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
-    <Version>0.0.2</Version>
-    <AssemblyVersion>$(Version)</AssemblyVersion>
-    <FileVersion>$(Version)</FileVersion>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <Version>1.0.0-rc.1</Version>
+    <AssemblyVersion>$(Version.Split('-')[0])</AssemblyVersion>
+    <FileVersion>$(Version.Split('-')[0])</FileVersion>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <PackageTags>devops;cicd;build;automation;pipelines;databases;schema;rdbms;deployment;migration;postgres</PackageTags>
     <LangVersion>latest</LangVersion>
   </PropertyGroup>
 
@@ -27,12 +33,19 @@
     <None Include="..\..\README.md" Pack="true" PackagePath="/">
       <Link>README.md</Link>
     </None>
+    <None Include="..\..\CHANGELOG.md" Pack="true" PackagePath="/">
+      <Link>CHANGELOG.md</Link>
+    </None>
+    <None Include="..\..\icon.png" Pack="true" PackagePath="/">
+      <Link>icon.png</Link>
+    </None>
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Npgsql" />
     <PackageReference Include="Npgsql.DependencyInjection" />
     <PackageReference Include="NSchema" />
+    <PackageReference Include="Microsoft.SourceLink.GitHub" PrivateAssets="all" />
   </ItemGroup>
 
 </Project>
