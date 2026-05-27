@@ -65,6 +65,8 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
                 c.column_name,
                 c.data_type,
                 c.udt_name,
+                c.domain_schema,
+                c.domain_name,
                 c.character_maximum_length,
                 c.numeric_precision,
                 c.numeric_scale,
@@ -101,15 +103,17 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
                 ColumnName: reader.GetString(2),
                 DataType: reader.GetString(3),
                 UdtName: reader.GetString(4),
-                MaxLength: reader.IsDBNull(5) ? null : reader.GetInt32(5),
-                NumericPrecision: reader.IsDBNull(6) ? null : reader.GetInt32(6),
-                NumericScale: reader.IsDBNull(7) ? null : reader.GetInt32(7),
-                IsNullable: reader.GetString(8) == "YES",
-                DefaultExpression: reader.IsDBNull(9) ? null : reader.GetString(9),
-                IsIdentity: reader.GetString(10) == "YES",
-                IdentityStart: reader.IsDBNull(11) ? null : reader.GetInt64(11),
-                IdentityMinValue: reader.IsDBNull(12) ? null : reader.GetInt64(12),
-                IdentityIncrement: reader.IsDBNull(13) ? null : reader.GetInt64(13)
+                DomainSchema: reader.IsDBNull(5) ? null : reader.GetString(5),
+                DomainName: reader.IsDBNull(6) ? null : reader.GetString(6),
+                MaxLength: reader.IsDBNull(7) ? null : reader.GetInt32(7),
+                NumericPrecision: reader.IsDBNull(8) ? null : reader.GetInt32(8),
+                NumericScale: reader.IsDBNull(9) ? null : reader.GetInt32(9),
+                IsNullable: reader.GetString(10) == "YES",
+                DefaultExpression: reader.IsDBNull(11) ? null : reader.GetString(11),
+                IsIdentity: reader.GetString(12) == "YES",
+                IdentityStart: reader.IsDBNull(13) ? null : reader.GetInt64(13),
+                IdentityMinValue: reader.IsDBNull(14) ? null : reader.GetInt64(14),
+                IdentityIncrement: reader.IsDBNull(15) ? null : reader.GetInt64(15)
             ));
         }
 
@@ -487,7 +491,7 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
 
     private static Column MapColumn(ColumnRow row, Dictionary<(string, string, string), string?> columnComments)
     {
-        var type = MapSqlType(row.DataType, row.UdtName, row.MaxLength, row.NumericPrecision, row.NumericScale);
+        var type = MapSqlType(row.DataType, row.UdtName, row.DomainSchema, row.DomainName, row.MaxLength, row.NumericPrecision, row.NumericScale);
         columnComments.TryGetValue((row.TableSchema, row.TableName, row.ColumnName), out var comment);
         var identityOptions = row.IsIdentity
             ? new IdentityOptions(row.IdentityStart, row.IdentityMinValue, row.IdentityIncrement)
@@ -495,8 +499,18 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         return new Column(row.ColumnName, type, row.IsNullable, row.IsIdentity, row.DefaultExpression, null, comment, identityOptions);
     }
 
-    private static SqlType MapSqlType(string dataType, string udtName, int? maxLength, int? precision, int? scale) => dataType switch
+    private static SqlType MapSqlType(string dataType, string udtName, string? domainSchema, string? domainName, int? maxLength, int? precision, int? scale)
     {
+        // For a column declared against a domain, information_schema returns the domain's
+        // base type in data_type (e.g. "text"). Preserve the domain name so the schema
+        // round-trips faithfully.
+        if (domainName is not null)
+        {
+            return SqlType.Custom(domainSchema is null or "public" ? domainName : $"{domainSchema}.{domainName}");
+        }
+
+        return dataType switch
+        {
         "boolean" => SqlType.Boolean,
         "smallint" => SqlType.SmallInt,
         "integer" => SqlType.Int,
@@ -514,7 +528,8 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         "uuid" => SqlType.Guid,
         "bytea" => SqlType.VarBinary(),
         _ => SqlType.Custom(udtName),
-    };
+        };
+    }
 
     private static TablePrivilege ToTablePrivilege(IEnumerable<string> privileges)
     {

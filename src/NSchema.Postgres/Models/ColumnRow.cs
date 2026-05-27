@@ -6,6 +6,8 @@ internal sealed record ColumnRow(
     string ColumnName,
     string DataType,
     string UdtName,
+    string? DomainSchema,
+    string? DomainName,
     int? MaxLength,
     int? NumericPrecision,
     int? NumericScale,
