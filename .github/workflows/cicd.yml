@@ -4,8 +4,6 @@ on:
   workflow_dispatch:
   pull_request:
     branches: [ main ]
-  release:
-    types: [ released ]
 
 jobs:
   build:
@@ -32,7 +30,9 @@ jobs:
     name: Deploy
     runs-on: ubuntu-latest
     environment: Development
-    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -49,3 +49,5 @@ jobs:
         env:
           Build__NuGetApiKey: ${{ secrets.NUGET_API_KEY }}
           Build__ProjectFile: 'src/NSchema.Postgres/NSchema.Postgres.csproj'
+          Build__CommitSha: ${{ github.sha }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
