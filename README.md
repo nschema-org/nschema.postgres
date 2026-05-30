@@ -23,7 +23,7 @@ var builder = NSchemaApplication.CreateBuilder(args);
 
 builder
     .AddSchemasFromAssemblyContaining<Program>()
-    .UsePostgres(connectionString);
+    .UseCurrentSchemaPostgres(connectionString);
 
 var app = builder.Build();
 await app.Apply();
@@ -33,24 +33,24 @@ On startup NSchema introspects the database through this provider, diffs it agai
 
 ## Configuration
 
-`UsePostgres` has four overloads. The three connection-aware overloads register an `NpgsqlDataSource` for you (via `AddNpgsqlDataSource`) and wire up the schema provider and SQL planner; the no-arg overload assumes you've already registered an `NpgsqlDataSource` yourself.
+`UseCurrentSchemaPostgres` has four overloads. The three connection-aware overloads register an `NpgsqlDataSource` for you (via `AddNpgsqlDataSource`) and wire up the current schema provider and SQL planner; the no-arg overload assumes you've already registered an `NpgsqlDataSource` yourself.
 
 ```csharp
 // 1. Connection string.
-builder.UsePostgres("Host=localhost;Database=app;Username=postgres;Password=postgres");
+builder.UseCurrentSchemaPostgres("Host=localhost;Database=app;Username=postgres;Password=postgres");
 
 // 2. Configure the data source builder directly.
-builder.UsePostgres(b => b
+builder.UseCurrentSchemaPostgres(b => b
     .EnableDynamicJson()
     .UseLoggerFactory(loggerFactory)
 );
 
 // 3. As above, with access to the IServiceProvider.
-builder.UsePostgres((sp, b) => b.UseLoggerFactory(sp.GetRequiredService<ILoggerFactory>()));
+builder.UseCurrentSchemaPostgres((sp, b) => b.UseLoggerFactory(sp.GetRequiredService<ILoggerFactory>()));
 
 // 4. Bring your own data source.
 builder.Services.AddNpgsqlDataSource(connectionString);
-builder.UsePostgres();
+builder.UseCurrentSchemaPostgres();
 ```
 
 ## Postgres-specific types

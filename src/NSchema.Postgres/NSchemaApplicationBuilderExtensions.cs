@@ -16,10 +16,10 @@ public static class NSchemaApplicationBuilderExtensions
         /// </summary>
         /// <param name="connectionString">The connection string to the PostgreSQL database.</param>
         /// <returns>The <see cref="NSchemaApplicationBuilder"/> instance, allowing for method chaining.</returns>
-        public NSchemaApplicationBuilder UsePostgres(string connectionString)
+        public NSchemaApplicationBuilder UseCurrentSchemaPostgres(string connectionString)
         {
             builder.Services.AddNpgsqlDataSource(connectionString);
-            return builder.UsePostgres();
+            return builder.UseCurrentSchemaPostgres();
         }
 
         /// <summary>
@@ -27,10 +27,10 @@ public static class NSchemaApplicationBuilderExtensions
         /// </summary>
         /// <param name="configure">A delegate that can be used to configure the NpgsqlDataSourceBuilder.</param>
         /// <returns>The <see cref="NSchemaApplicationBuilder"/> instance, allowing for method chaining.</returns>
-        public NSchemaApplicationBuilder UsePostgres(Action<NpgsqlDataSourceBuilder> configure)
+        public NSchemaApplicationBuilder UseCurrentSchemaPostgres(Action<NpgsqlDataSourceBuilder> configure)
         {
             builder.Services.AddNpgsqlDataSource("", configure);
-            return builder.UsePostgres();
+            return builder.UseCurrentSchemaPostgres();
         }
 
         /// <summary>
@@ -38,17 +38,17 @@ public static class NSchemaApplicationBuilderExtensions
         /// </summary>
         /// <param name="configure">A delegate that can be used to configure the NpgsqlDataSourceBuilder.</param>
         /// <returns>The <see cref="NSchemaApplicationBuilder"/> instance, allowing for method chaining.</returns>
-        public NSchemaApplicationBuilder UsePostgres(Action<IServiceProvider, NpgsqlDataSourceBuilder> configure)
+        public NSchemaApplicationBuilder UseCurrentSchemaPostgres(Action<IServiceProvider, NpgsqlDataSourceBuilder> configure)
         {
             builder.Services.AddNpgsqlDataSource("", configure);
-            return builder.UsePostgres();
+            return builder.UseCurrentSchemaPostgres();
         }
 
         /// <summary>
         /// Configures NSchema to use PostgreSQL as the database provider by registering the necessary services for schema management and SQL planning specific to PostgreSQL.
         /// </summary>
         /// <returns>The <see cref="NSchemaApplicationBuilder"/> instance, allowing for method chaining.</returns>
-        public NSchemaApplicationBuilder UsePostgres() => builder
+        public NSchemaApplicationBuilder UseCurrentSchemaPostgres() => builder
             .UseCurrentSchema<PostgresSchemaProvider>()
             .UseSqlPlanner<PostgresSqlPlanner>();
     }
