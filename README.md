@@ -26,7 +26,7 @@ builder
     .UsePostgres(connectionString);
 
 var app = builder.Build();
-await app.RunAsync();
+await app.Apply();
 ```
 
 On startup NSchema introspects the database through this provider, diffs it against your declared schema, and applies the resulting plan.
@@ -42,11 +42,11 @@ builder.UsePostgres("Host=localhost;Database=app;Username=postgres;Password=post
 // 2. Configure the data source builder directly.
 builder.UsePostgres(b => b
     .EnableDynamicJson()
-    .UseLoggerFactory(loggerFactory));
+    .UseLoggerFactory(loggerFactory)
+);
 
 // 3. As above, with access to the IServiceProvider.
-builder.UsePostgres((sp, b) => b
-    .UseLoggerFactory(sp.GetRequiredService<ILoggerFactory>()));
+builder.UsePostgres((sp, b) => b.UseLoggerFactory(sp.GetRequiredService<ILoggerFactory>()));
 
 // 4. Bring your own data source.
 builder.Services.AddNpgsqlDataSource(connectionString);
