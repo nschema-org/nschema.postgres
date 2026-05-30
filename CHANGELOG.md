@@ -15,6 +15,7 @@ As a consequence, breaking changes that are specific to this provider (rather th
 ### Changed
 
 - **Breaking:** Updated to NSchema 2.0.0, which includes some breaking changes to the core NSchema API. This provider's public API is unchanged, but you may need to update your application code to accommodate the NSchema changes.
+- **Breaking:** The `UsePostgres` methods have been renamed to `UseCurrentSchemaPostgres` to be more explicit about what you're configuring.
 
 ## [1.0.0] - 2026-05-27
 
