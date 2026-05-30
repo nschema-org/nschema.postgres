@@ -2,7 +2,19 @@
 
 All notable changes to NSchema will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project will adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once a 1.0 release is published.
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project (mostly) adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## Versioning policy
+
+This package uses **lockstep major versioning** with the core NSchema package: `NSchema.Postgres X.*.*` requires `NSchema X.*.*`, so version compatibility is always clear.
+
+As a consequence, breaking changes that are specific to this provider (rather than the core API) are signalled by a **minor version bump** rather than a major one, and called out explicitly in this changelog.
+
+## [Unreleased] - 2026-05-30
+
+### Changed
+
+- **Breaking:** Updated to NSchema 2.0.0, which includes some breaking changes to the core NSchema API. This provider's public API is unchanged, but you may need to update your application code to accommodate the NSchema changes.
 
 ## [1.0.0] - 2026-05-27
 
