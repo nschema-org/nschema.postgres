@@ -1,4 +1,4 @@
-name: NSchema.Postgres CI/CD Pipeline
+name: NSchema.Postgres
 
 on:
   workflow_dispatch:
