@@ -10,11 +10,11 @@ This package uses **lockstep major versioning** with the core NSchema package: `
 
 As a consequence, breaking changes that are specific to this provider (rather than the core API) are signalled by a **minor version bump** rather than a major one, and called out explicitly in this changelog.
 
-## [Unreleased]
+## [2.0.0] - 2026-06-01
 
 ### Changed
 
-- **Breaking:** Updated to NSchema 2.0.0, which includes some breaking changes to the core NSchema API. This provider's public API is unchanged, but you may need to update your application code to accommodate the NSchema changes.
+- **Breaking:** Updated to NSchema 2.0.0, which includes some breaking changes to the core NSchema API.
 - **Breaking:** The `UsePostgres` methods have been renamed to `UseCurrentSchemaPostgres` to be more explicit about what you're configuring.
 
 ## [1.0.0] - 2026-05-27

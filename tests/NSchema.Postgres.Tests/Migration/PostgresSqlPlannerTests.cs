@@ -1,4 +1,6 @@
+using Microsoft.Extensions.Options;
 using Npgsql;
+using NSchema.Migration;
 using NSchema.Migration.Plan;
 using NSchema.Migration.Sql;
 using NSchema.Postgres.Migration;
@@ -20,7 +22,7 @@ public sealed class PostgresSqlPlannerTests(PostgresContainerFixture fixture) : 
     {
         _conn = await _dataSource.OpenConnectionAsync();
         _planner = new PostgresSqlPlanner();
-        _executor = new DefaultSqlExecutor(_dataSource);
+        _executor = new DefaultSqlExecutor(_dataSource, Options.Create(new SqlExecutorOptions { TransactionMode = TransactionMode.Single }));
         await Exec($"""CREATE SCHEMA "{_schema}" """);
     }
 
@@ -179,7 +181,7 @@ public sealed class PostgresSqlPlannerTests(PostgresContainerFixture fixture) : 
         await Exec($"""CREATE TABLE "{_schema}"."items" (id integer, name text)""");
 
         // Act
-        await _executor.Execute(_planner.Plan(new MigrationPlan([new DropColumn(_schema, "items", "name")], DatabaseSchema.Create([]))));
+        await _executor.Execute(_planner.Plan(new MigrationPlan([new DropColumn(_schema, "items", Column.Create("name", SqlType.Text))], DatabaseSchema.Create([]))));
 
         // Assert
         var exists = await ScalarBool(
