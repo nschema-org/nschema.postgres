@@ -10,6 +10,12 @@ This package uses **lockstep major versioning** with the core NSchema package: `
 
 As a consequence, breaking changes that are specific to this provider (rather than the core API) are signalled by a **minor version bump** rather than a major one, and called out explicitly in this changelog.
 
+## [Unreleased]
+
+### Changed
+
+- **Breaking:** Updated to NSchema 3.0.0, which includes many breaking changes to the core NSchema API.
+-
 ## [2.0.0] - 2026-06-01
 
 ### Changed

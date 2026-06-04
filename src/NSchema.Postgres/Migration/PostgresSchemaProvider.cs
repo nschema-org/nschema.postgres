@@ -1,8 +1,8 @@
 using Npgsql;
 using NpgsqlTypes;
-using NSchema.Migration;
 using NSchema.Postgres.Models;
 using NSchema.Schema;
+using NSchema.Schema.Model;
 
 namespace NSchema.Postgres.Migration;
 
