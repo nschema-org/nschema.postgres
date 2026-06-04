@@ -50,6 +50,6 @@ public static class NSchemaApplicationBuilderExtensions
         /// <returns>The <see cref="NSchemaApplicationBuilder"/> instance, allowing for method chaining.</returns>
         public NSchemaApplicationBuilder UseCurrentSchemaPostgres() => builder
             .UseCurrentSchema<PostgresSchemaProvider>()
-            .UseSqlPlanner<PostgresSqlPlanner>();
+            .UseSqlGenerator<PostgresSqlGenerator>();
     }
 }

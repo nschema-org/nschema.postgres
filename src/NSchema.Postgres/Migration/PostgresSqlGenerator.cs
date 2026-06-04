@@ -1,12 +1,13 @@
-using NSchema.Migration.Plan;
-using NSchema.Migration.Sql;
-using NSchema.Schema;
+using NSchema.Plan.Model;
+using NSchema.Schema.Model;
+using NSchema.Sql;
+using NSchema.Sql.Model;
 
 namespace NSchema.Postgres.Migration;
 
-internal sealed class PostgresSqlPlanner : ISqlPlanner
+internal sealed class PostgresSqlGenerator : ISqlGenerator
 {
-    public SqlPlan Plan(MigrationPlan plan)
+    public SqlPlan Generate(MigrationPlan plan)
     {
         var statements = plan.Actions.Select(ToStatement).ToList();
         return new SqlPlan(statements);

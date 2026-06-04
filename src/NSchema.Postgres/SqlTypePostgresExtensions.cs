@@ -1,4 +1,4 @@
-using NSchema.Schema;
+using NSchema.Schema.Model;
 
 namespace NSchema.Postgres;
 
