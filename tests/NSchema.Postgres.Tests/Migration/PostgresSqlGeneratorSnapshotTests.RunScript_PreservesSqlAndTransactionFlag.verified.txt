@@ -1,0 +1,13 @@
+﻿{
+  Statements: [
+    {
+      Sql: INSERT INTO users (email) VALUES ('a@b.com'),
+      RunOutsideTransaction: false
+    },
+    {
+      Sql: REINDEX TABLE users,
+      RunOutsideTransaction: true
+    }
+  ],
+  IsEmpty: false
+}

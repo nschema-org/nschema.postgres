@@ -1,0 +1,17 @@
+﻿{
+  Statements: [
+    {
+      Sql: CREATE UNIQUE INDEX "idx_users_email" ON "public"."users" ("email"),
+      RunOutsideTransaction: false
+    },
+    {
+      Sql: CREATE INDEX "idx_users_active" ON "public"."users" ("created_at") WHERE notes IS NOT NULL,
+      RunOutsideTransaction: false
+    },
+    {
+      Sql: DROP INDEX "public"."idx_users_email" ,
+      RunOutsideTransaction: false
+    }
+  ],
+  IsEmpty: false
+}
