@@ -50,6 +50,12 @@ public static class NSchemaApplicationBuilderExtensions
         /// <returns>The <see cref="NSchemaApplicationBuilder"/> instance, allowing for method chaining.</returns>
         public NSchemaApplicationBuilder UseCurrentSchemaPostgres() => builder
             .UseCurrentSchema<PostgresSchemaProvider>()
-            .UseSqlGenerator<PostgresSqlGenerator>();
+            .AddPostgresGenerator();
+
+        /// <summary>
+        /// Adds a SQL generator to the NSchema application, enabling it to generate SQL for Postgres.
+        /// </summary>
+        /// <returns>The <see cref="NSchemaApplicationBuilder"/> instance, allowing for method chaining.</returns>
+        public NSchemaApplicationBuilder AddPostgresGenerator() => builder.AddSqlGenerator<PostgresSqlGenerator>();
     }
 }

@@ -12,10 +12,14 @@ As a consequence, breaking changes that are specific to this provider (rather th
 
 ## [Unreleased]
 
+### Added
+
+- `NSchemaApplicationBuilder.AddPostgresGenerator` extension for registering only the Postrges SQL generator and not the provider.
+
 ### Changed
 
 - **Breaking:** Updated to NSchema 3.0.0, which includes many breaking changes to the core NSchema API.
--
+
 ## [2.0.0] - 2026-06-01
 
 ### Changed

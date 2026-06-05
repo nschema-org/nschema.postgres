@@ -10,7 +10,7 @@ public sealed class PostgresContainerFixture : IAsyncLifetime
 
     public NpgsqlDataSource DataSource { get; private set; } = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         await _container.StartAsync();
         DataSource = NpgsqlDataSource.Create(_container.GetConnectionString());
@@ -21,7 +21,7 @@ public sealed class PostgresContainerFixture : IAsyncLifetime
         await cmd.ExecuteNonQueryAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await DataSource.DisposeAsync();
         await _container.DisposeAsync();
