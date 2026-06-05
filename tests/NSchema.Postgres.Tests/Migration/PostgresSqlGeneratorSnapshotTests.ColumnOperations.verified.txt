@@ -5,7 +5,7 @@
       RunOutsideTransaction: false
     },
     {
-      Sql: ALTER TABLE "public"."users" RENAME COLUMN "age" TO "years" ,
+      Sql: ALTER TABLE "public"."users" RENAME COLUMN "age" TO "years",
       RunOutsideTransaction: false
     },
     {
@@ -29,7 +29,7 @@
       RunOutsideTransaction: false
     },
     {
-      Sql: ALTER TABLE "public"."users" DROP COLUMN "years" ,
+      Sql: ALTER TABLE "public"."users" DROP COLUMN "years",
       RunOutsideTransaction: false
     }
   ],

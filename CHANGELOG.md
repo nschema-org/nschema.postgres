@@ -20,6 +20,10 @@ As a consequence, breaking changes that are specific to this provider (rather th
 
 - **Breaking:** Updated to NSchema 3.0.0, which includes many breaking changes to the core NSchema API.
 
+### Fixed
+
+- Removed trailing whitespace from generated SQL statements.
+
 ## [2.0.0] - 2026-06-01
 
 ### Changed

@@ -27,15 +27,15 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
 
     private static string GenerateSql(MigrationAction action) => action switch
     {
-        CreateSchema x => $"""CREATE SCHEMA IF NOT EXISTS "{x.SchemaName}" """,
+        CreateSchema x => $"CREATE SCHEMA IF NOT EXISTS \"{x.SchemaName}\"",
         DropSchema x => $"""DROP SCHEMA "{x.SchemaName}" CASCADE""",
-        RenameSchema x => $"""ALTER SCHEMA "{x.OldName}" RENAME TO "{x.NewName}" """,
+        RenameSchema x => $"ALTER SCHEMA \"{x.OldName}\" RENAME TO \"{x.NewName}\"",
         CreateTable x => BuildCreateTable(x),
-        DropTable x => $"""DROP TABLE "{x.SchemaName}"."{x.TableName}" """,
-        RenameTable x => $"""ALTER TABLE "{x.SchemaName}"."{x.OldName}" RENAME TO "{x.NewName}" """,
+        DropTable x => $"DROP TABLE \"{x.SchemaName}\".\"{x.TableName}\"",
+        RenameTable x => $"ALTER TABLE \"{x.SchemaName}\".\"{x.OldName}\" RENAME TO \"{x.NewName}\"",
         AddColumn x => $"""ALTER TABLE "{x.SchemaName}"."{x.TableName}" ADD COLUMN {BuildColumnDef(x.Column)}""",
-        DropColumn x => $"""ALTER TABLE "{x.SchemaName}"."{x.TableName}" DROP COLUMN "{x.ColumnName}" """,
-        RenameColumn x => $"""ALTER TABLE "{x.SchemaName}"."{x.TableName}" RENAME COLUMN "{x.OldName}" TO "{x.NewName}" """,
+        DropColumn x => $"ALTER TABLE \"{x.SchemaName}\".\"{x.TableName}\" DROP COLUMN \"{x.ColumnName}\"",
+        RenameColumn x => $"ALTER TABLE \"{x.SchemaName}\".\"{x.TableName}\" RENAME COLUMN \"{x.OldName}\" TO \"{x.NewName}\"",
         AlterColumnType x => $"""ALTER TABLE "{x.SchemaName}"."{x.TableName}" ALTER COLUMN "{x.ColumnName}" TYPE {ToPostgresType(x.NewType)}""",
         AlterColumnNullability { NewNullable: false } x => $"""ALTER TABLE "{x.SchemaName}"."{x.TableName}" ALTER COLUMN "{x.ColumnName}" SET NOT NULL""",
         AlterColumnNullability x => $"""ALTER TABLE "{x.SchemaName}"."{x.TableName}" ALTER COLUMN "{x.ColumnName}" DROP NOT NULL""",
@@ -43,11 +43,11 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
         SetColumnDefault { NewDefault: null } x => $"""ALTER TABLE "{x.SchemaName}"."{x.TableName}" ALTER COLUMN "{x.ColumnName}" DROP DEFAULT""",
         SetColumnDefault x => $"""ALTER TABLE "{x.SchemaName}"."{x.TableName}" ALTER COLUMN "{x.ColumnName}" SET DEFAULT {x.NewDefault}""",
         AddPrimaryKey x => $"""ALTER TABLE "{x.SchemaName}"."{x.TableName}" ADD CONSTRAINT "{x.PrimaryKey.Name}" PRIMARY KEY ({ColList(x.PrimaryKey.ColumnNames)})""",
-        DropPrimaryKey x => $"""ALTER TABLE "{x.SchemaName}"."{x.TableName}" DROP CONSTRAINT "{x.PrimaryKeyName}" """,
+        DropPrimaryKey x => $"ALTER TABLE \"{x.SchemaName}\".\"{x.TableName}\" DROP CONSTRAINT \"{x.PrimaryKeyName}\"",
         AddForeignKey x => BuildAddForeignKey(x),
-        DropForeignKey x => $"""ALTER TABLE "{x.SchemaName}"."{x.TableName}" DROP CONSTRAINT "{x.ForeignKeyName}" """,
+        DropForeignKey x => $"ALTER TABLE \"{x.SchemaName}\".\"{x.TableName}\" DROP CONSTRAINT \"{x.ForeignKeyName}\"",
         CreateIndex x => BuildCreateIndex(x),
-        DropIndex x => $"""DROP INDEX "{x.SchemaName}"."{x.IndexName}" """,
+        DropIndex x => $"DROP INDEX \"{x.SchemaName}\".\"{x.IndexName}\"",
         SetSchemaComment x => x.NewComment is null
             ? $"""COMMENT ON SCHEMA "{x.SchemaName}" IS NULL"""
             : $"""COMMENT ON SCHEMA "{x.SchemaName}" IS $comment${x.NewComment}$comment$""",

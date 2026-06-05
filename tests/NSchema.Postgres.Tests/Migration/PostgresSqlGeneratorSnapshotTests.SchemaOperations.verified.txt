@@ -1,11 +1,11 @@
 ﻿{
   Statements: [
     {
-      Sql: CREATE SCHEMA IF NOT EXISTS "sales" ,
+      Sql: CREATE SCHEMA IF NOT EXISTS "sales",
       RunOutsideTransaction: false
     },
     {
-      Sql: ALTER SCHEMA "sales" RENAME TO "commerce" ,
+      Sql: ALTER SCHEMA "sales" RENAME TO "commerce",
       RunOutsideTransaction: false
     },
     {

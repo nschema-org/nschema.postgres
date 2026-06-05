@@ -5,7 +5,7 @@
       RunOutsideTransaction: false
     },
     {
-      Sql: ALTER TABLE "public"."orders" DROP CONSTRAINT "fk_orders_user" ,
+      Sql: ALTER TABLE "public"."orders" DROP CONSTRAINT "fk_orders_user",
       RunOutsideTransaction: false
     }
   ],
