@@ -13,14 +13,14 @@ public sealed class PostgresSchemaProviderTests(PostgresContainerFixture fixture
     private NpgsqlConnection _connection = null!;
     private PostgresSchemaProvider _sut = null!;
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         _connection = await _dataSource.OpenConnectionAsync();
         _sut = new PostgresSchemaProvider(_dataSource);
         await Exec($"CREATE SCHEMA \"{_schema}\"");
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         await Exec($"DROP SCHEMA IF EXISTS \"{_schema}\" CASCADE");
         await _connection.DisposeAsync();
@@ -42,7 +42,7 @@ public sealed class PostgresSchemaProviderTests(PostgresContainerFixture fixture
         // (schema created in InitializeAsync)
 
         // Act
-        var model = await _sut.GetSchema([_schema]);
+        var model = await _sut.GetSchema([_schema], TestContext.Current.CancellationToken);
 
         // Assert
         model.Schemas.ShouldHaveSingleItem();
@@ -62,7 +62,7 @@ public sealed class PostgresSchemaProviderTests(PostgresContainerFixture fixture
             """);
 
         // Act
-        var model = await _sut.GetSchema([_schema]);
+        var model = await _sut.GetSchema([_schema], TestContext.Current.CancellationToken);
 
         // Assert
         model.Schemas[0].Tables.ShouldHaveSingleItem();
@@ -83,7 +83,7 @@ public sealed class PostgresSchemaProviderTests(PostgresContainerFixture fixture
             """);
 
         // Act
-        var cols = (await _sut.GetSchema([_schema]))
+        var cols = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken))
             .Schemas[0].Tables[0].Columns.ToDictionary(c => c.Name);
 
         // Assert
@@ -119,7 +119,7 @@ public sealed class PostgresSchemaProviderTests(PostgresContainerFixture fixture
             """);
 
         // Act
-        var cols = (await _sut.GetSchema([_schema]))
+        var cols = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken))
             .Schemas[0].Tables[0].Columns.ToDictionary(c => c.Name);
 
         // Assert
@@ -153,7 +153,7 @@ public sealed class PostgresSchemaProviderTests(PostgresContainerFixture fixture
             """);
 
         // Act
-        var emailCol = (await _sut.GetSchema([_schema]))
+        var emailCol = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken))
             .Schemas[0].Tables[0].Columns.Single(c => c.Name == "email");
 
         // Assert
@@ -174,7 +174,7 @@ public sealed class PostgresSchemaProviderTests(PostgresContainerFixture fixture
             """);
 
         // Act
-        var idCol = (await _sut.GetSchema([_schema]))
+        var idCol = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken))
             .Schemas[0].Tables[0].Columns.Single(c => c.Name == "id");
 
         // Assert
@@ -194,7 +194,7 @@ public sealed class PostgresSchemaProviderTests(PostgresContainerFixture fixture
             """);
 
         // Act
-        var statusCol = (await _sut.GetSchema([_schema]))
+        var statusCol = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken))
             .Schemas[0].Tables[0].Columns.Single(c => c.Name == "status");
 
         // Assert
@@ -216,7 +216,7 @@ public sealed class PostgresSchemaProviderTests(PostgresContainerFixture fixture
             """);
 
         // Act
-        var table = (await _sut.GetSchema([_schema])).Schemas[0].Tables[0];
+        var table = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken)).Schemas[0].Tables[0];
 
         // Assert
         table.PrimaryKey.ShouldNotBeNull();
@@ -237,7 +237,7 @@ public sealed class PostgresSchemaProviderTests(PostgresContainerFixture fixture
             """);
 
         // Act
-        var pk = (await _sut.GetSchema([_schema])).Schemas[0].Tables[0].PrimaryKey;
+        var pk = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken)).Schemas[0].Tables[0].PrimaryKey;
 
         // Assert
         pk.ShouldNotBeNull();
@@ -255,7 +255,7 @@ public sealed class PostgresSchemaProviderTests(PostgresContainerFixture fixture
             """);
 
         // Act
-        var table = (await _sut.GetSchema([_schema])).Schemas[0].Tables[0];
+        var table = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken)).Schemas[0].Tables[0];
 
         // Assert
         table.PrimaryKey.ShouldBeNull();
@@ -280,7 +280,7 @@ public sealed class PostgresSchemaProviderTests(PostgresContainerFixture fixture
             """);
 
         // Act
-        var fks = (await _sut.GetSchema([_schema]))
+        var fks = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken))
             .Schemas[0].Tables.Single(t => t.Name == "users").ForeignKeys;
 
         // Assert
@@ -314,7 +314,7 @@ public sealed class PostgresSchemaProviderTests(PostgresContainerFixture fixture
             """);
 
         // Act
-        var fk = (await _sut.GetSchema([_schema]))
+        var fk = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken))
             .Schemas[0].Tables.Single(t => t.Name == "users").ForeignKeys[0];
 
         // Assert
@@ -333,7 +333,7 @@ public sealed class PostgresSchemaProviderTests(PostgresContainerFixture fixture
             """);
 
         // Act
-        var table = (await _sut.GetSchema([_schema])).Schemas[0].Tables[0];
+        var table = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken)).Schemas[0].Tables[0];
 
         // Assert
         table.ForeignKeys.ShouldBeEmpty();
@@ -354,7 +354,7 @@ public sealed class PostgresSchemaProviderTests(PostgresContainerFixture fixture
             """);
 
         // Act
-        var idx = (await _sut.GetSchema([_schema]))
+        var idx = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken))
             .Schemas[0].Tables[0].Indexes.Single();
 
         // Assert
@@ -376,7 +376,7 @@ public sealed class PostgresSchemaProviderTests(PostgresContainerFixture fixture
             """);
 
         // Act
-        var idx = (await _sut.GetSchema([_schema]))
+        var idx = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken))
             .Schemas[0].Tables[0].Indexes.Single();
 
         // Assert
@@ -397,7 +397,7 @@ public sealed class PostgresSchemaProviderTests(PostgresContainerFixture fixture
             """);
 
         // Act
-        var idx = (await _sut.GetSchema([_schema]))
+        var idx = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken))
             .Schemas[0].Tables[0].Indexes.Single();
 
         // Assert
@@ -415,7 +415,7 @@ public sealed class PostgresSchemaProviderTests(PostgresContainerFixture fixture
             """);
 
         // Act
-        var table = (await _sut.GetSchema([_schema])).Schemas[0].Tables[0];
+        var table = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken)).Schemas[0].Tables[0];
 
         // Assert
         table.Indexes.ShouldBeEmpty();

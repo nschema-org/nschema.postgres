@@ -7,11 +7,15 @@ namespace NSchema.Postgres.Migration;
 
 internal sealed class PostgresSqlGenerator : ISqlGenerator
 {
+    public const string PostgresDialect = "postgres";
+
     public SqlPlan Generate(MigrationPlan plan)
     {
         var statements = plan.Actions.Select(ToStatement).ToList();
         return new SqlPlan(statements);
     }
+
+    public string Dialect => PostgresDialect;
 
     private static SqlStatement ToStatement(MigrationAction action) => action switch
     {
