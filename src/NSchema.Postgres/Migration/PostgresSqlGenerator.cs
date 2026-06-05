@@ -7,7 +7,7 @@ namespace NSchema.Postgres.Migration;
 
 internal sealed class PostgresSqlGenerator : ISqlGenerator
 {
-    public const string PostgresDialect = "postgres";
+    private const string PostgresDialect = "postgres";
 
     public SqlPlan Generate(MigrationPlan plan)
     {
