@@ -8,7 +8,7 @@ namespace NSchema.Postgres.Migration;
 
 internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISchemaProvider
 {
-    public async Task<DatabaseSchema> GetSchema(string[]? schemas = null, CancellationToken cancellationToken = default)
+    public async ValueTask<DatabaseSchema> GetSchema(string[]? schemas = null, CancellationToken cancellationToken = default)
     {
         await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
 
