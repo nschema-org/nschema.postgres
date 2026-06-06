@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Options;
 using Npgsql;
+using NSchema.Hosting;
 using NSchema.Migration;
 using NSchema.Plan.Model;
 using NSchema.Postgres.Migration;
@@ -23,7 +24,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
     {
         _conn = await _dataSource.OpenConnectionAsync();
         _generator = new PostgresSqlGenerator();
-        _executor = new DefaultSqlExecutor(Options.Create(new SqlExecutorOptions { TransactionMode = TransactionMode.Single }), _dataSource);
+        _executor = new DefaultSqlExecutor(Options.Create(new OperationOptions { TransactionMode = TransactionMode.Single }), _dataSource);
         await Exec($"""CREATE SCHEMA "{_schema}" """);
     }
 
