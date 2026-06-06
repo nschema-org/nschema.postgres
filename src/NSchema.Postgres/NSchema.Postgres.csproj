@@ -10,17 +10,17 @@
     <Authors>Tom Wolfe</Authors>
     <Copyright>Copyright © 2026 Tom Wolfe</Copyright>
     <PackageId>NSchema.Postgres</PackageId>
-    <PackageProjectUrl>https://github.com/tom-wolfe/NSchema.Postgres</PackageProjectUrl>
+    <PackageProjectUrl>https://github.com/nschema-org/NSchema.Postgres</PackageProjectUrl>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageIcon>icon.png</PackageIcon>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <RepositoryUrl>https://github.com/tom-wolfe/NSchema.Postgres.git</RepositoryUrl>
+    <RepositoryUrl>https://github.com/nschema-org/NSchema.Postgres.git</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
     <EmbedUntrackedSources>true</EmbedUntrackedSources>
     <IncludeSymbols>true</IncludeSymbols>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
-    <Version>3.0.0-alpha.3</Version>
+    <Version>3.0.0-alpha.4</Version>
     <AssemblyVersion>$(Version.Split('-')[0])</AssemblyVersion>
     <FileVersion>$(Version.Split('-')[0])</FileVersion>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
@@ -44,8 +44,8 @@
   <ItemGroup>
     <PackageReference Include="Npgsql" />
     <PackageReference Include="Npgsql.DependencyInjection" />
-    <PackageReference Include="NSchema" />
     <PackageReference Include="Microsoft.SourceLink.GitHub" PrivateAssets="all" />
+    <PackageReference Include="NSchema.Core" />
   </ItemGroup>
 
 </Project>

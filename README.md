@@ -1,6 +1,10 @@
+# ![NSchema](https://raw.githubusercontent.com/nschema-org/NSchema.Core/main/assets/nschema-logo-horizontal.png)
+
+[![NSchema.Postgres](https://github.com/nschema-org/NSchema.Postgres/actions/workflows/cicd.yml/badge.svg)](https://github.com/nschema-org/NSchema.Postgres/actions/workflows/cicd.yml)
+
 # NSchema.Postgres
 
-PostgreSQL provider for [NSchema](https://github.com/tom-wolfe/NSchema), the declarative database schema migration library for .NET.
+PostgreSQL provider for [NSchema](https://github.com/nschema-org/NSchema.Core), the declarative database schema migration library for .NET.
 
 This package plugs PostgreSQL-specific implementations of NSchema's `ISchemaProvider` (live-database introspection) and `ISqlPlanner` (DDL generation) into your application, and contributes Postgres-only `SqlType` helpers.
 
@@ -79,11 +83,6 @@ The introspector reads, and the planner emits DDL for:
 - Primary keys
 - Foreign keys
 - Indexes, including unique indexes and index comments
-
-## Requirements
-
-- .NET 10
-- PostgreSQL (tested against `postgres:17-alpine` via Testcontainers)
 
 ## License
 
