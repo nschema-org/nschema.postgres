@@ -11,15 +11,12 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
 
     public SqlPlan Generate(MigrationPlan plan)
     {
-        var statements = plan.Actions.Select(ToStatement).ToList();
-        return new SqlPlan(statements);
+        var preDeploymentStatements = plan.PreDeploymentScripts.Select(s => new SqlStatement(s.Sql, s.RunOutsideTransaction));
+        var postDeploymentStatements = plan.PostDeploymentScripts.Select(s => new SqlStatement(s.Sql, s.RunOutsideTransaction));
+        var statements = plan.Actions.Select(s => new SqlStatement(GenerateSql(s))).ToList();
+        List<SqlStatement> allStatements = [..preDeploymentStatements, ..statements, ..postDeploymentStatements];
+        return new SqlPlan(allStatements);
     }
-
-    private static SqlStatement ToStatement(MigrationAction action) => action switch
-    {
-        RunScript x => new SqlStatement(x.Script.Sql, x.Script.RunOutsideTransaction),
-        _ => new SqlStatement(GenerateSql(action)),
-    };
 
     // ── SQL generation ────────────────────────────────────────────────────────
 
@@ -62,7 +59,6 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
         RevokeSchemaUsage x => $"""REVOKE USAGE ON SCHEMA "{x.SchemaName}" FROM {x.Role}""",
         GrantTablePrivileges x => $"""GRANT {PrivilegeList(x.Privileges)} ON TABLE "{x.SchemaName}"."{x.TableName}" TO {x.Role}""",
         RevokeTablePrivileges x => $"""REVOKE ALL PRIVILEGES ON TABLE "{x.SchemaName}"."{x.TableName}" FROM {x.Role}""",
-        RunScript x => x.Script.Sql,
         _ => throw new ArgumentOutOfRangeException(nameof(action), $"Unhandled action type: {action.GetType().Name}")
     };
 
