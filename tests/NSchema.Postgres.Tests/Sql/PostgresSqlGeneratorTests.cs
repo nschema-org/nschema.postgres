@@ -1,7 +1,5 @@
 using Microsoft.Extensions.Options;
 using Npgsql;
-using NSchema.Hosting;
-using NSchema.Migration;
 using NSchema.Plan.Model;
 using NSchema.Postgres.Sql;
 using NSchema.Postgres.Tests.Fixtures;
@@ -24,7 +22,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
     {
         _conn = await _dataSource.OpenConnectionAsync();
         _generator = new PostgresSqlGenerator();
-        _executor = new DefaultSqlExecutor(Options.Create(new OperationOptions { TransactionMode = TransactionMode.Single }), _dataSource);
+        _executor = new DefaultSqlExecutor(Options.Create(new SqlOptions { TransactionMode = TransactionMode.Single }), _dataSource);
         await Exec($"""CREATE SCHEMA "{_schema}" """);
     }
 
@@ -43,7 +41,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         var name = $"test_{Guid.NewGuid():N}";
 
         // Act
-        await _executor.Execute(_generator.Generate(new MigrationPlan([new CreateSchema(name)])), TestContext.Current.CancellationToken);
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new CreateSchema(name)], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         var exists = await ScalarBool(
@@ -61,7 +59,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         await Exec($"""CREATE SCHEMA "{name}" """);
 
         // Act
-        await _executor.Execute(_generator.Generate(new MigrationPlan([new DropSchema(name)])), TestContext.Current.CancellationToken);
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new DropSchema(name)], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         var exists = await ScalarBool(
@@ -78,7 +76,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         await Exec($"""CREATE SCHEMA "{oldName}" """);
 
         // Act
-        await _executor.Execute(_generator.Generate(new MigrationPlan([new RenameSchema(oldName, newName)])), TestContext.Current.CancellationToken);
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new RenameSchema(oldName, newName)], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         var oldExists = await ScalarBool(
@@ -101,7 +99,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
             columns: [Column.Create("id", SqlType.BigInt, isNullable: false)]);
 
         // Act
-        await _executor.Execute(_generator.Generate(new MigrationPlan([new CreateTable(_schema, table)])), TestContext.Current.CancellationToken);
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new CreateTable(_schema, table)], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         var exists = await ScalarBool(
@@ -117,7 +115,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
             primaryKey: new PrimaryKey("pk_orders", ["id"]), columns: [Column.Create("id", SqlType.BigInt, isNullable: false)]);
 
         // Act
-        await _executor.Execute(_generator.Generate(new MigrationPlan([new CreateTable(_schema, table)])), TestContext.Current.CancellationToken);
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new CreateTable(_schema, table)], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         var exists = await ScalarBool(
@@ -132,7 +130,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         await Exec($"""CREATE TABLE "{_schema}"."products" (id integer)""");
 
         // Act
-        await _executor.Execute(_generator.Generate(new MigrationPlan([new DropTable(_schema, "products")])), TestContext.Current.CancellationToken);
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new DropTable(_schema, "products")], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         var exists = await ScalarBool(
@@ -147,7 +145,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         await Exec($"""CREATE TABLE "{_schema}"."old_name" (id integer)""");
 
         // Act
-        await _executor.Execute(_generator.Generate(new MigrationPlan([new RenameTable(_schema, "old_name", "new_name")])), TestContext.Current.CancellationToken);
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new RenameTable(_schema, "old_name", "new_name")], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         var oldExists = await ScalarBool(
@@ -168,7 +166,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         var column = Column.Create("name", SqlType.VarChar(100), isNullable: false);
 
         // Act
-        await _executor.Execute(_generator.Generate(new MigrationPlan([new AddColumn(_schema, "items", column)])), TestContext.Current.CancellationToken);
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new AddColumn(_schema, "items", column)], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         var exists = await ScalarBool(
@@ -183,7 +181,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         await Exec($"""CREATE TABLE "{_schema}"."items" (id integer, name text)""");
 
         // Act
-        await _executor.Execute(_generator.Generate(new MigrationPlan([new DropColumn(_schema, "items", Column.Create("name", SqlType.Text))])), TestContext.Current.CancellationToken);
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new DropColumn(_schema, "items", Column.Create("name", SqlType.Text))], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         var exists = await ScalarBool(
@@ -198,7 +196,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         await Exec($"""CREATE TABLE "{_schema}"."items" (id integer, old_col text)""");
 
         // Act
-        await _executor.Execute(_generator.Generate(new MigrationPlan([new RenameColumn(_schema, "items", "old_col", "new_col")])), TestContext.Current.CancellationToken);
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new RenameColumn(_schema, "items", "old_col", "new_col")], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         var oldExists = await ScalarBool(
@@ -216,7 +214,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         await Exec($"""CREATE TABLE "{_schema}"."items" (id integer, value integer)""");
 
         // Act
-        await _executor.Execute(_generator.Generate(new MigrationPlan([new AlterColumnType(_schema, "items", "value", SqlType.Int, SqlType.BigInt)])), TestContext.Current.CancellationToken);
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new AlterColumnType(_schema, "items", "value", SqlType.Int, SqlType.BigInt)], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         var dataType = await ScalarString(
@@ -231,7 +229,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         await Exec($"""CREATE TABLE "{_schema}"."items" (id integer, name text)""");
 
         // Act
-        await _executor.Execute(_generator.Generate(new MigrationPlan([new AlterColumnNullability(_schema, "items", "name", OldNullable: true, NewNullable: false)])), TestContext.Current.CancellationToken);
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new AlterColumnNullability(_schema, "items", "name", OldNullable: true, NewNullable: false)], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         var isNullable = await ScalarString(
@@ -246,7 +244,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         await Exec($"""CREATE TABLE "{_schema}"."items" (id integer, name text NOT NULL)""");
 
         // Act
-        await _executor.Execute(_generator.Generate(new MigrationPlan([new AlterColumnNullability(_schema, "items", "name", OldNullable: false, NewNullable: true)])), TestContext.Current.CancellationToken);
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new AlterColumnNullability(_schema, "items", "name", OldNullable: false, NewNullable: true)], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         var isNullable = await ScalarString(
@@ -261,7 +259,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         await Exec($"""CREATE TABLE "{_schema}"."items" (id integer, quantity integer)""");
 
         // Act
-        await _executor.Execute(_generator.Generate(new MigrationPlan([new SetColumnDefault(_schema, "items", "quantity", null, "0")])), TestContext.Current.CancellationToken);
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new SetColumnDefault(_schema, "items", "quantity", null, "0")], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         var hasDefault = await ScalarBool(
@@ -276,7 +274,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         await Exec($"""CREATE TABLE "{_schema}"."items" (id integer, quantity integer DEFAULT 0)""");
 
         // Act
-        await _executor.Execute(_generator.Generate(new MigrationPlan([new SetColumnDefault(_schema, "items", "quantity", "0", null)])), TestContext.Current.CancellationToken);
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new SetColumnDefault(_schema, "items", "quantity", "0", null)], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         var hasDefault = await ScalarBool(
@@ -293,7 +291,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         await Exec($"""CREATE TABLE "{_schema}"."items" (id integer NOT NULL)""");
 
         // Act
-        await _executor.Execute(_generator.Generate(new MigrationPlan([new AddPrimaryKey(_schema, "items", new PrimaryKey("pk_items", ["id"]))])), TestContext.Current.CancellationToken);
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new AddPrimaryKey(_schema, "items", new PrimaryKey("pk_items", ["id"]))], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         var exists = await ScalarBool(
@@ -308,7 +306,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         await Exec($"""CREATE TABLE "{_schema}"."items" (id integer NOT NULL, CONSTRAINT pk_items PRIMARY KEY (id))""");
 
         // Act
-        await _executor.Execute(_generator.Generate(new MigrationPlan([new DropPrimaryKey(_schema, "items", "pk_items")])), TestContext.Current.CancellationToken);
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new DropPrimaryKey(_schema, "items", "pk_items")], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         var exists = await ScalarBool(
@@ -327,7 +325,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         var fk = ForeignKey.Create("fk_children_parent", ["parent_id"], _schema, "parents", ["id"]);
 
         // Act
-        await _executor.Execute(_generator.Generate(new MigrationPlan([new AddForeignKey(_schema, "children", fk)])), TestContext.Current.CancellationToken);
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new AddForeignKey(_schema, "children", fk)], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         var exists = await ScalarBool(
@@ -343,7 +341,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         await Exec($"""CREATE TABLE "{_schema}"."children" (id integer, parent_id integer, CONSTRAINT fk_children_parent FOREIGN KEY (parent_id) REFERENCES "{_schema}"."parents" (id))""");
 
         // Act
-        await _executor.Execute(_generator.Generate(new MigrationPlan([new DropForeignKey(_schema, "children", "fk_children_parent")])), TestContext.Current.CancellationToken);
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new DropForeignKey(_schema, "children", "fk_children_parent")], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         var exists = await ScalarBool(
@@ -361,7 +359,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         var index = TableIndex.Create("idx_items_name", ["name"]);
 
         // Act
-        await _executor.Execute(_generator.Generate(new MigrationPlan([new CreateIndex(_schema, "items", index)])), TestContext.Current.CancellationToken);
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new CreateIndex(_schema, "items", index)], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         var exists = await ScalarBool(
@@ -377,7 +375,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         var index = TableIndex.Create("idx_items_code_unique", ["code"], isUnique: true);
 
         // Act
-        await _executor.Execute(_generator.Generate(new MigrationPlan([new CreateIndex(_schema, "items", index)])), TestContext.Current.CancellationToken);
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new CreateIndex(_schema, "items", index)], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         var isUnique = await ScalarBool(
@@ -393,7 +391,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         await Exec($"""CREATE INDEX "idx_items_name" ON "{_schema}"."items" (name)""");
 
         // Act
-        await _executor.Execute(_generator.Generate(new MigrationPlan([new DropIndex(_schema, "items", "idx_items_name")])), TestContext.Current.CancellationToken);
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new DropIndex(_schema, "items", "idx_items_name")], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         var exists = await ScalarBool(
@@ -410,7 +408,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         var script = new Script("seed", $"""CREATE TABLE "{_schema}"."seeded" (id integer)""", ScriptType.PreDeployment);
 
         // Act
-        await _executor.Execute(_generator.Generate(new MigrationPlan([new RunScript(script)])), TestContext.Current.CancellationToken);
+        await _executor.Execute(_generator.Generate(new MigrationPlan([], [script], [])), TestContext.Current.CancellationToken);
 
         // Assert
         var exists = await ScalarBool(
@@ -425,7 +423,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         var script = new Script("seed", $"""CREATE TABLE "{_schema}"."seeded_post" (id integer)""", ScriptType.PostDeployment);
 
         // Act
-        await _executor.Execute(_generator.Generate(new MigrationPlan([new RunScript(script)])), TestContext.Current.CancellationToken);
+        await _executor.Execute(_generator.Generate(new MigrationPlan([], [], [script])), TestContext.Current.CancellationToken);
 
         // Assert
         var exists = await ScalarBool(
@@ -441,15 +439,12 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         // Arrange — a plan that creates a table successfully, then fails on a bad statement.
         var goodTable = Table.Create("rollback_target",
             columns: [Column.Create("id", SqlType.BigInt)]);
-        var planActions = new MigrationAction[]
-        {
-            new CreateTable(_schema, goodTable),
-            new RunScript(new Script("boom", "SELECT * FROM does_not_exist_xyz", ScriptType.PostDeployment)),
-        };
+        var action = new CreateTable(_schema, goodTable);
+        var postScript = new Script("boom", "SELECT * FROM does_not_exist_xyz", ScriptType.PostDeployment);
 
         // Act
         await Should.ThrowAsync<PostgresException>(() =>
-            _executor.Execute(_generator.Generate(new MigrationPlan(planActions))));
+            _executor.Execute(_generator.Generate(new MigrationPlan([action], [], [postScript]))));
 
         // Assert — the create from earlier in the plan should have been rolled back.
         var exists = await ScalarBool(
@@ -465,15 +460,11 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         {
             RunOutsideTransaction = true,
         };
-        var planActions = new MigrationAction[]
-        {
-            new RunScript(preScript),
-            new RunScript(new Script("boom", "SELECT * FROM does_not_exist_xyz", ScriptType.PostDeployment)),
-        };
+        var postScript = new Script("boom", "SELECT * FROM does_not_exist_xyz", ScriptType.PostDeployment);
 
         // Act
         await Should.ThrowAsync<PostgresException>(() =>
-            _executor.Execute(_generator.Generate(new MigrationPlan(planActions))));
+            _executor.Execute(_generator.Generate(new MigrationPlan([], [preScript], [postScript]))));
 
         // Assert — the out-of-tx script committed before the failure, so its table survives.
         var exists = await ScalarBool(

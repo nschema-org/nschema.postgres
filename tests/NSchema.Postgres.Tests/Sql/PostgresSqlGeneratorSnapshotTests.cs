@@ -17,7 +17,7 @@ public sealed class PostgresSqlGeneratorSnapshotTests
     private static readonly ISqlGenerator Generator = new PostgresSqlGenerator();
 
     private static Task VerifyPlan(params MigrationAction[] actions) =>
-        Verify(Generator.Generate(new MigrationPlan(actions)));
+        Verify(Generator.Generate(new MigrationPlan(actions, [], [])));
 
     // ── Schema operations ─────────────────────────────────────────────────────
 
@@ -113,16 +113,6 @@ public sealed class PostgresSqlGeneratorSnapshotTests
         new GrantTablePrivileges("public", "users", "readonly", TablePrivilege.Select),
         new RevokeTablePrivileges("public", "users", "app_role", TablePrivilege.All),
         new RevokeSchemaUsage("public", "app_role"));
-
-    // ── Scripts ─────────────────────────────────────────────────────────────────
-
-    [Fact]
-    public Task RunScript_PreservesSqlAndTransactionFlag() => VerifyPlan(
-        new RunScript(new Script("seed", "INSERT INTO users (email) VALUES ('a@b.com')", ScriptType.PreDeployment)),
-        new RunScript(new Script("reindex", "REINDEX TABLE users", ScriptType.PostDeployment)
-        {
-            RunOutsideTransaction = true,
-        }));
 
     // ── Type mapping ────────────────────────────────────────────────────────────
 
