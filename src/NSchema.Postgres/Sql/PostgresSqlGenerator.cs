@@ -187,32 +187,30 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
 
     // ── Type mapping ──────────────────────────────────────────────────────────
 
-    private static string ToPostgresType(SqlType type) => type switch
+    private static string ToPostgresType(SqlType type) => type.Name switch
     {
-        SqlType.BooleanType => "boolean",
-        SqlType.TinyIntType => "smallint",
-        SqlType.SmallIntType => "smallint",
-        SqlType.IntType => "integer",
-        SqlType.BigIntType => "bigint",
-        SqlType.FloatType => "real",
-        SqlType.DoubleType => "double precision",
-        SqlType.DecimalType(var p, var s) => $"numeric({p}, {s})",
-        SqlType.CharType(var n) => $"character({n})",
-        SqlType.NCharType(var n) => $"character({n})",
-        SqlType.VarCharType(null) => "character varying",
-        SqlType.VarCharType(var n) => $"character varying({n})",
-        SqlType.NVarCharType(null) => "character varying",
-        SqlType.NVarCharType(var n) => $"character varying({n})",
-        SqlType.TextType => "text",
-        SqlType.DateType => "date",
-        SqlType.TimeType => "time",
-        SqlType.DateTimeType => "timestamp",
-        SqlType.DateTimeOffsetType => "timestamptz",
-        SqlType.GuidType => "uuid",
-        SqlType.BinaryType => "bytea",
-        SqlType.VarBinaryType => "bytea",
-        SqlType.CustomType(var n) => n,
-        _ => throw new ArgumentOutOfRangeException(nameof(type), $"Unhandled SqlType: {type.GetType().Name}")
+        "boolean" => "boolean",
+        "tinyint" => "smallint",
+        "smallint" => "smallint",
+        "int" => "integer",
+        "bigint" => "bigint",
+        "float" => "real",
+        "double" => "double precision",
+        "decimal" => $"numeric({type.Precision}, {type.Scale})",
+        "char" or "nchar" => $"character({type.Length})",
+        "varchar" => type.Length is { } vn ? $"character varying({vn})" : "character varying",
+        "nvarchar" => type.Length is { } nvn ? $"character varying({nvn})" : "character varying",
+        "text" => "text",
+        "date" => "date",
+        "time" => "time",
+        "datetime" => "timestamp",
+        "datetimeoffset" => "timestamptz",
+        "guid" => "uuid",
+        "binary" => "bytea",
+        "varbinary" => "bytea",
+        // Any other name is a database-specific or user-defined type (e.g. citext, jsonb);
+        // emit it verbatim.
+        _ => type.Name,
     };
 
     private static string ToReferentialAction(ReferentialAction action) => action switch
