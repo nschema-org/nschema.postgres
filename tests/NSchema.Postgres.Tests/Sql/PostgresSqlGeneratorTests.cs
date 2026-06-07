@@ -3,13 +3,13 @@ using Npgsql;
 using NSchema.Hosting;
 using NSchema.Migration;
 using NSchema.Plan.Model;
-using NSchema.Postgres.Migration;
+using NSchema.Postgres.Sql;
 using NSchema.Postgres.Tests.Fixtures;
 using NSchema.Schema.Model;
 using NSchema.Scripts.Model;
 using NSchema.Sql;
 
-namespace NSchema.Postgres.Tests.Migration;
+namespace NSchema.Postgres.Tests.Sql;
 
 [Collection("postgres")]
 public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) : IAsyncLifetime

@@ -1,9 +1,9 @@
 using Npgsql;
-using NSchema.Postgres.Migration;
+using NSchema.Postgres.Sql;
 using NSchema.Postgres.Tests.Fixtures;
 using NSchema.Schema.Model;
 
-namespace NSchema.Postgres.Tests.Migration;
+namespace NSchema.Postgres.Tests.Sql;
 
 [Collection("postgres")]
 public sealed class PostgresSchemaProviderTests(PostgresContainerFixture fixture) : IAsyncLifetime
