@@ -14,7 +14,7 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
         var preDeploymentStatements = plan.PreDeploymentScripts.Select(s => new SqlStatement(s.Sql, s.RunOutsideTransaction));
         var postDeploymentStatements = plan.PostDeploymentScripts.Select(s => new SqlStatement(s.Sql, s.RunOutsideTransaction));
         var statements = plan.Actions.Select(s => new SqlStatement(GenerateSql(s))).ToList();
-        List<SqlStatement> allStatements = [..preDeploymentStatements, ..statements, ..postDeploymentStatements];
+        List<SqlStatement> allStatements = [.. preDeploymentStatements, .. statements, .. postDeploymentStatements];
         return new SqlPlan(allStatements);
     }
 
