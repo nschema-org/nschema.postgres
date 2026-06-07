@@ -3,7 +3,7 @@ using NSchema.Schema.Model;
 using NSchema.Sql;
 using NSchema.Sql.Model;
 
-namespace NSchema.Postgres.Migration;
+namespace NSchema.Postgres.Sql;
 
 internal sealed class PostgresSqlGenerator : ISqlGenerator
 {

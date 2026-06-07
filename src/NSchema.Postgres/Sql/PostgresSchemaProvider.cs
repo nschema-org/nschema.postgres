@@ -4,7 +4,7 @@ using NSchema.Postgres.Models;
 using NSchema.Schema;
 using NSchema.Schema.Model;
 
-namespace NSchema.Postgres.Migration;
+namespace NSchema.Postgres.Sql;
 
 internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISchemaProvider
 {

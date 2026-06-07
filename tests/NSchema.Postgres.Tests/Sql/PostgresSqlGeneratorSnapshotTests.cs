@@ -1,12 +1,10 @@
 using NSchema.Plan.Model;
-using NSchema.Postgres.Migration;
+using NSchema.Postgres.Sql;
 using NSchema.Schema.Model;
 using NSchema.Scripts.Model;
 using NSchema.Sql;
-using NSchema.Sql.Model;
-using static VerifyXunit.Verifier;
 
-namespace NSchema.Postgres.Tests.Migration;
+namespace NSchema.Postgres.Tests.Sql;
 
 /// <summary>
 /// Snapshot tests for <see cref="PostgresSqlGenerator"/>. Unlike <see cref="PostgresSqlGeneratorTests"/>
