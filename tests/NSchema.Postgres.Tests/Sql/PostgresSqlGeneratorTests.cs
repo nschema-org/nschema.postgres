@@ -95,8 +95,8 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
     public async Task CreateTable_CreatesTableInDatabase()
     {
         // Arrange
-        var table = Table.Create("users",
-            columns: [Column.Create("id", SqlType.BigInt, isNullable: false)]);
+        var table = new Table("users",
+            Columns: [new Column("id", SqlType.BigInt, IsNullable: false)]);
 
         // Act
         await _executor.Execute(_generator.Generate(new MigrationPlan([new CreateTable(_schema, table)], [], [])), TestContext.Current.CancellationToken);
@@ -111,8 +111,8 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
     public async Task CreateTable_WithPrimaryKey_CreatesPrimaryKeyConstraint()
     {
         // Arrange
-        var table = Table.Create("orders",
-            primaryKey: new PrimaryKey("pk_orders", ["id"]), columns: [Column.Create("id", SqlType.BigInt, isNullable: false)]);
+        var table = new Table("orders",
+            PrimaryKey: new PrimaryKey("pk_orders", ["id"]), Columns: [new Column("id", SqlType.BigInt, IsNullable: false)]);
 
         // Act
         await _executor.Execute(_generator.Generate(new MigrationPlan([new CreateTable(_schema, table)], [], [])), TestContext.Current.CancellationToken);
@@ -163,7 +163,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
     {
         // Arrange
         await Exec($"""CREATE TABLE "{_schema}"."items" (id integer)""");
-        var column = Column.Create("name", SqlType.VarChar(100), isNullable: false);
+        var column = new Column("name", SqlType.VarChar(100), IsNullable: false);
 
         // Act
         await _executor.Execute(_generator.Generate(new MigrationPlan([new AddColumn(_schema, "items", column)], [], [])), TestContext.Current.CancellationToken);
@@ -181,7 +181,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         await Exec($"""CREATE TABLE "{_schema}"."items" (id integer, name text)""");
 
         // Act
-        await _executor.Execute(_generator.Generate(new MigrationPlan([new DropColumn(_schema, "items", Column.Create("name", SqlType.Text))], [], [])), TestContext.Current.CancellationToken);
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new DropColumn(_schema, "items", new Column("name", SqlType.Text))], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         var exists = await ScalarBool(
@@ -322,7 +322,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         // Arrange
         await Exec($"""CREATE TABLE "{_schema}"."parents" (id integer NOT NULL, CONSTRAINT pk_parents PRIMARY KEY (id))""");
         await Exec($"""CREATE TABLE "{_schema}"."children" (id integer NOT NULL, parent_id integer)""");
-        var fk = ForeignKey.Create("fk_children_parent", ["parent_id"], _schema, "parents", ["id"]);
+        var fk = new ForeignKey("fk_children_parent", ["parent_id"], _schema, "parents", ["id"]);
 
         // Act
         await _executor.Execute(_generator.Generate(new MigrationPlan([new AddForeignKey(_schema, "children", fk)], [], [])), TestContext.Current.CancellationToken);
@@ -455,7 +455,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
     {
         // Arrange
         await Exec($"""CREATE TABLE "{_schema}"."items" (id integer, name text)""");
-        var index = TableIndex.Create("idx_items_name", ["name"]);
+        var index = new TableIndex("idx_items_name", ["name"]);
 
         // Act
         await _executor.Execute(_generator.Generate(new MigrationPlan([new CreateIndex(_schema, "items", index)], [], [])), TestContext.Current.CancellationToken);
@@ -471,7 +471,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
     {
         // Arrange
         await Exec($"""CREATE TABLE "{_schema}"."items" (id integer, code text)""");
-        var index = TableIndex.Create("idx_items_code_unique", ["code"], isUnique: true);
+        var index = new TableIndex("idx_items_code_unique", ["code"], IsUnique: true);
 
         // Act
         await _executor.Execute(_generator.Generate(new MigrationPlan([new CreateIndex(_schema, "items", index)], [], [])), TestContext.Current.CancellationToken);
@@ -496,6 +496,89 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         var exists = await ScalarBool(
             $"SELECT COUNT(*) > 0 FROM pg_indexes WHERE schemaname = '{_schema}' AND indexname = 'idx_items_name'");
         exists.ShouldBeFalse();
+    }
+
+    // ── Views ───────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task CreateView_CreatesViewInDatabase()
+    {
+        // Arrange
+        await Exec($"""CREATE TABLE "{_schema}"."users" (id integer, active boolean)""");
+        var view = new View("active_users", $"""SELECT id FROM "{_schema}"."users" WHERE active""");
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new CreateView(_schema, view)], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        var exists = await ScalarBool(
+            $"SELECT COUNT(*) > 0 FROM information_schema.views WHERE table_schema = '{_schema}' AND table_name = 'active_users'");
+        exists.ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task CreateView_OnExistingView_ReplacesDefinition()
+    {
+        // Arrange — CreateView serves both add and body-modify; the second create must replace, not error.
+        await Exec($"""CREATE TABLE "{_schema}"."users" (id integer, email text)""");
+        await Exec($"""CREATE VIEW "{_schema}"."u" AS SELECT id FROM "{_schema}"."users" """);
+        var replacement = new View("u", $"""SELECT id, email FROM "{_schema}"."users" """);
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new CreateView(_schema, replacement)], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert — the definition now includes the email column.
+        var def = await ScalarString(
+            $"SELECT pg_get_viewdef('\"{_schema}\".\"u\"'::regclass)");
+        def.ShouldContain("email");
+    }
+
+    [Fact]
+    public async Task DropView_RemovesView()
+    {
+        // Arrange
+        await Exec($"""CREATE TABLE "{_schema}"."users" (id integer)""");
+        await Exec($"""CREATE VIEW "{_schema}"."u" AS SELECT id FROM "{_schema}"."users" """);
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new DropView(_schema, "u")], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        var exists = await ScalarBool(
+            $"SELECT COUNT(*) > 0 FROM information_schema.views WHERE table_schema = '{_schema}' AND table_name = 'u'");
+        exists.ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task RenameView_RenamesView()
+    {
+        // Arrange
+        await Exec($"""CREATE TABLE "{_schema}"."users" (id integer)""");
+        await Exec($"""CREATE VIEW "{_schema}"."old_u" AS SELECT id FROM "{_schema}"."users" """);
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new RenameView(_schema, "old_u", "new_u")], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        var exists = await ScalarBool(
+            $"SELECT COUNT(*) > 0 FROM information_schema.views WHERE table_schema = '{_schema}' AND table_name = 'new_u'");
+        exists.ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task SetViewComment_SetsComment()
+    {
+        // Arrange
+        await Exec($"""CREATE TABLE "{_schema}"."users" (id integer)""");
+        await Exec($"""CREATE VIEW "{_schema}"."u" AS SELECT id FROM "{_schema}"."users" """);
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new SetViewComment(_schema, "u", null, "the view")], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        var comment = await ScalarString(
+            $"SELECT obj_description('\"{_schema}\".\"u\"'::regclass)");
+        comment.ShouldBe("the view");
     }
 
     // ── Deployment scripts ────────────────────────────────────────────────────

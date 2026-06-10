@@ -31,23 +31,23 @@ public sealed class PostgresSqlGeneratorSnapshotTests
 
     [Fact]
     public Task CreateTable_WithColumnsAndPrimaryKey() => VerifyPlan(
-        new CreateTable("public", Table.Create("users",
-            primaryKey: new PrimaryKey("pk_users", ["id"]),
-            columns:
+        new CreateTable("public", new Table("users",
+            PrimaryKey: new PrimaryKey("pk_users", ["id"]),
+            Columns:
             [
-                Column.Create("id", SqlType.BigInt, isNullable: false, isIdentity: true),
-                Column.Create("email", SqlType.VarChar(255), isNullable: false),
-                Column.Create("created_at", SqlType.DateTimeOffset, isNullable: false, defaultExpression: "now()"),
-                Column.Create("notes", SqlType.Text),
+                new Column("id", SqlType.BigInt, IsNullable: false, IsIdentity: true),
+                new Column("email", SqlType.VarChar(255), IsNullable: false),
+                new Column("created_at", SqlType.DateTimeOffset, IsNullable: false, DefaultExpression: "now()"),
+                new Column("notes", SqlType.Text),
             ])));
 
     [Fact]
     public Task CreateTable_WithIdentityOptions() => VerifyPlan(
-        new CreateTable("public", Table.Create("counters",
-            columns:
+        new CreateTable("public", new Table("counters",
+            Columns:
             [
-                Column.Create("id", SqlType.BigInt, isNullable: false, isIdentity: true,
-                    identityOptions: new IdentityOptions(StartWith: 1000, MinValue: 1000, IncrementBy: 5)),
+                new Column("id", SqlType.BigInt, IsNullable: false, IsIdentity: true,
+                    IdentityOptions: new IdentityOptions(StartWith: 1000, MinValue: 1000, IncrementBy: 5)),
             ])));
 
     [Fact]
@@ -59,14 +59,14 @@ public sealed class PostgresSqlGeneratorSnapshotTests
 
     [Fact]
     public Task ColumnOperations() => VerifyPlan(
-        new AddColumn("public", "users", Column.Create("age", SqlType.Int)),
+        new AddColumn("public", "users", new Column("age", SqlType.Int)),
         new RenameColumn("public", "users", "age", "years"),
         new AlterColumnType("public", "users", "years", SqlType.Int, SqlType.BigInt),
         new AlterColumnNullability("public", "users", "years", OldNullable: true, NewNullable: false),
         new AlterColumnNullability("public", "users", "notes", OldNullable: false, NewNullable: true),
         new SetColumnDefault("public", "users", "years", null, "0"),
         new SetColumnDefault("public", "users", "years", "0", null),
-        new DropColumn("public", "users", Column.Create("years", SqlType.BigInt)));
+        new DropColumn("public", "users", new Column("years", SqlType.BigInt)));
 
     [Fact]
     public Task AlterIdentitySequence() => VerifyPlan(
@@ -83,16 +83,26 @@ public sealed class PostgresSqlGeneratorSnapshotTests
 
     [Fact]
     public Task ForeignKeyOperations() => VerifyPlan(
-        new AddForeignKey("public", "orders", ForeignKey.Create(
+        new AddForeignKey("public", "orders", new ForeignKey(
             "fk_orders_user", ["user_id"], "public", "users", ["id"],
-            onDelete: ReferentialAction.Cascade, onUpdate: ReferentialAction.SetNull)),
+            OnDelete: ReferentialAction.Cascade, OnUpdate: ReferentialAction.SetNull)),
         new DropForeignKey("public", "orders", "fk_orders_user"));
 
     [Fact]
     public Task IndexOperations() => VerifyPlan(
-        new CreateIndex("public", "users", TableIndex.Create("idx_users_email", ["email"], isUnique: true)),
-        new CreateIndex("public", "users", TableIndex.Create("idx_users_active", ["created_at"], predicate: "notes IS NOT NULL")),
+        new CreateIndex("public", "users", new TableIndex("idx_users_email", ["email"], IsUnique: true)),
+        new CreateIndex("public", "users", new TableIndex("idx_users_active", ["created_at"], Predicate: "notes IS NOT NULL")),
         new DropIndex("public", "users", "idx_users_email"));
+
+    // ── Views ─────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public Task ViewOperations() => VerifyPlan(
+        new CreateView("public", new View("active_users", "SELECT id, email FROM public.users WHERE active")),
+        new RenameView("public", "legacy_active", "active_users"),
+        new SetViewComment("public", "active_users", null, "Active users only"),
+        new SetViewComment("public", "active_users", "Active users only", null),
+        new DropView("public", "active_users"));
 
     // ── Comments ────────────────────────────────────────────────────────────────
 
