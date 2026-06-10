@@ -883,4 +883,145 @@ public sealed class PostgresSchemaProviderTests(PostgresContainerFixture fixture
         // Assert
         sequence.Comment.ShouldBe("order numbers");
     }
+
+    // ── Functions & procedures ────────────────────────────────────────────────
+
+    [Fact]
+    public async Task GetSchema_Function_ReturnsArgumentsAndDefinition()
+    {
+        // Arrange
+        await Exec($"""
+            CREATE FUNCTION "{_schema}".add_numbers(a integer, b integer)
+            RETURNS integer LANGUAGE sql AS $$ SELECT a + b $$
+            """);
+
+        // Act
+        var function = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Functions.ShouldHaveSingleItem();
+
+        // Assert — both parts are the DB's canonical form: the argument list as pg_get_function_arguments renders
+        // it, and the definition starting right after the CREATE header (at RETURNS).
+        function.Name.ShouldBe("add_numbers");
+        function.Arguments.ShouldBe("a integer, b integer");
+        function.Definition.ShouldStartWith("RETURNS integer");
+        function.Definition.ShouldContain("LANGUAGE sql");
+        function.Definition.ShouldContain("SELECT a + b");
+    }
+
+    [Fact]
+    public async Task GetSchema_FunctionWithParenthesisedDefault_HeaderStripSurvives()
+    {
+        // Arrange — a default containing parentheses would defeat any "cut at the first ')'" parsing; the header
+        // strip must be driven by the rendered argument list instead.
+        await Exec($"""
+            CREATE FUNCTION "{_schema}".pad(value text DEFAULT repeat('x', 3))
+            RETURNS text LANGUAGE sql AS $$ SELECT value $$
+            """);
+
+        // Act
+        var function = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Functions.ShouldHaveSingleItem();
+
+        // Assert
+        function.Arguments.ShouldStartWith("value text DEFAULT repeat(");
+        function.Definition.ShouldStartWith("RETURNS text");
+    }
+
+    [Fact]
+    public async Task GetSchema_QuotedFunctionName_HeaderStripSurvives()
+    {
+        // Arrange — a mixed-case name is quoted in the pg_get_functiondef header; the strip must match that form.
+        await Exec($"""CREATE FUNCTION "{_schema}"."GetAnswer"() RETURNS integer LANGUAGE sql AS $$ SELECT 42 $$""");
+
+        // Act
+        var function = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Functions.ShouldHaveSingleItem();
+
+        // Assert
+        function.Name.ShouldBe("GetAnswer");
+        function.Arguments.ShouldBe("");
+        function.Definition.ShouldStartWith("RETURNS integer");
+    }
+
+    [Fact]
+    public async Task GetSchema_FunctionComment_IsCaptured()
+    {
+        // Arrange
+        await Exec($"""
+            CREATE FUNCTION "{_schema}".answer() RETURNS integer LANGUAGE sql AS $$ SELECT 42 $$;
+            COMMENT ON FUNCTION "{_schema}".answer IS 'the answer';
+            """);
+
+        // Act
+        var function = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Functions.ShouldHaveSingleItem();
+
+        // Assert
+        function.Comment.ShouldBe("the answer");
+    }
+
+    [Fact]
+    public async Task GetSchema_Procedure_ReturnedAsProcedureNotFunction()
+    {
+        // Arrange
+        await Exec($"""CREATE PROCEDURE "{_schema}".noop(a integer) LANGUAGE sql AS $$ SELECT 1 $$""");
+
+        // Act
+        var schema = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken)).Schemas[0];
+
+        // Assert — prokind separates the two sets; a procedure must not leak into Functions.
+        schema.Functions.ShouldBeEmpty();
+        var procedure = schema.Procedures.ShouldHaveSingleItem();
+        procedure.Name.ShouldBe("noop");
+        procedure.Arguments.ShouldBe("a integer");
+        procedure.Definition.ShouldStartWith("LANGUAGE sql");
+        procedure.Definition.ShouldContain("SELECT 1");
+    }
+
+    [Fact]
+    public async Task GetSchema_ProcedureComment_IsCaptured()
+    {
+        // Arrange
+        await Exec($"""
+            CREATE PROCEDURE "{_schema}".noop() LANGUAGE sql AS $$ SELECT 1 $$;
+            COMMENT ON PROCEDURE "{_schema}".noop IS 'does nothing';
+            """);
+
+        // Act
+        var procedure = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Procedures.ShouldHaveSingleItem();
+
+        // Assert
+        procedure.Comment.ShouldBe("does nothing");
+    }
+
+    [Fact]
+    public async Task GetSchema_ExtensionFunctions_AreExcluded()
+    {
+        // Arrange — the fixture enables citext in public, which installs dozens of support functions. They are the
+        // extension's implementation detail and must not surface, or they would read as drift to drop.
+        // (Nothing else in the suite creates routines in public.)
+
+        // Act
+        var publicSchema = (await _sut.GetSchema(["public"], TestContext.Current.CancellationToken))
+            .Schemas.Single(s => s.Name == "public");
+
+        // Assert
+        publicSchema.Functions.ShouldBeEmpty();
+        publicSchema.Procedures.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task GetSchema_Aggregate_IsNotReturnedAsFunction()
+    {
+        // Arrange — an aggregate is a pg_proc row too (prokind 'a'), but it is not part of the model.
+        await Exec($"""CREATE AGGREGATE "{_schema}".int_sum (integer) (sfunc = int4pl, stype = integer)""");
+
+        // Act
+        var schema = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken)).Schemas[0];
+
+        // Assert
+        schema.Functions.ShouldBeEmpty();
+        schema.Procedures.ShouldBeEmpty();
+    }
 }
