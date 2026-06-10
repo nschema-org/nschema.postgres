@@ -642,4 +642,96 @@ public sealed class PostgresSchemaProviderTests(PostgresContainerFixture fixture
         // Assert
         fk.Comment.ShouldBe("owning organisation");
     }
+
+    // ── Views ─────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task GetSchema_View_ReturnsViewWithCanonicalDefinition()
+    {
+        // Arrange
+        await Exec($"""
+            CREATE TABLE "{_schema}".users (id INTEGER NOT NULL, active BOOLEAN NOT NULL);
+            CREATE VIEW "{_schema}".active_users AS SELECT id FROM "{_schema}".users WHERE active;
+            """);
+
+        // Act
+        var view = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Views.ShouldHaveSingleItem();
+
+        // Assert — body is the DB's canonical form (no trailing ';'), so apply → plan round-trips clean.
+        view.Name.ShouldBe("active_users");
+        view.Body.ShouldContain("SELECT");
+        view.Body.ShouldContain("id");
+        view.Body.TrimEnd().ShouldNotEndWith(";");
+    }
+
+    [Fact]
+    public async Task GetSchema_View_IsNotReturnedAsTable()
+    {
+        // Arrange
+        await Exec($"""
+            CREATE TABLE "{_schema}".users (id INTEGER NOT NULL);
+            CREATE VIEW "{_schema}".u AS SELECT id FROM "{_schema}".users;
+            """);
+
+        // Act
+        var schema = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken)).Schemas[0];
+
+        // Assert — the view must not leak into the table set.
+        schema.Tables.Select(t => t.Name).ShouldBe(["users"]);
+        schema.Views.ShouldHaveSingleItem().Name.ShouldBe("u");
+    }
+
+    [Fact]
+    public async Task GetSchema_ViewComment_IsCaptured()
+    {
+        // Arrange
+        await Exec($"""
+            CREATE TABLE "{_schema}".users (id INTEGER NOT NULL);
+            CREATE VIEW "{_schema}".u AS SELECT id FROM "{_schema}".users;
+            COMMENT ON VIEW "{_schema}".u IS 'just the ids';
+            """);
+
+        // Act
+        var view = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Views.ShouldHaveSingleItem();
+
+        // Assert
+        view.Comment.ShouldBe("just the ids");
+    }
+
+    [Fact]
+    public async Task GetSchema_ViewDependencies_CaptureUnderlyingTable()
+    {
+        // Arrange
+        await Exec($"""
+            CREATE TABLE "{_schema}".users (id INTEGER NOT NULL);
+            CREATE VIEW "{_schema}".u AS SELECT id FROM "{_schema}".users;
+            """);
+
+        // Act
+        var view = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Views.ShouldHaveSingleItem();
+
+        // Assert
+        view.DependsOn.ShouldHaveSingleItem().ShouldBe(new ViewDependency(_schema, "users"));
+    }
+
+    [Fact]
+    public async Task GetSchema_ViewOnView_CapturesViewDependency()
+    {
+        // Arrange — a view reading another view must record the view-to-view dependency for drop ordering.
+        await Exec($"""
+            CREATE TABLE "{_schema}".users (id INTEGER NOT NULL, active BOOLEAN NOT NULL);
+            CREATE VIEW "{_schema}".active_users AS SELECT id FROM "{_schema}".users WHERE active;
+            CREATE VIEW "{_schema}".active_ids AS SELECT id FROM "{_schema}".active_users;
+            """);
+
+        // Act
+        var derived = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Views.Single(v => v.Name == "active_ids");
+
+        // Assert
+        derived.DependsOn.ShouldHaveSingleItem().ShouldBe(new ViewDependency(_schema, "active_users"));
+    }
 }

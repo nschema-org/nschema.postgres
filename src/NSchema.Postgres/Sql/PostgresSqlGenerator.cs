@@ -47,6 +47,15 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
         DropCheckConstraint x => $"ALTER TABLE \"{x.SchemaName}\".\"{x.TableName}\" DROP CONSTRAINT \"{x.ConstraintName}\"",
         CreateIndex x => BuildCreateIndex(x),
         DropIndex x => $"DROP INDEX \"{x.SchemaName}\".\"{x.IndexName}\"",
+        // A view Add and a body Modify both arrive as CreateView; CREATE OR REPLACE serves both. An incompatible
+        // output-column change (rename/drop/retype/reorder) is rejected loudly by Postgres rather than silently
+        // dropping dependents — see CLAUDE.md / the core view-body decision.
+        CreateView x => $"""CREATE OR REPLACE VIEW "{x.SchemaName}"."{x.View.Name}" AS {x.View.Body}""",
+        DropView x => $"DROP VIEW \"{x.SchemaName}\".\"{x.ViewName}\"",
+        RenameView x => $"ALTER VIEW \"{x.SchemaName}\".\"{x.OldName}\" RENAME TO \"{x.NewName}\"",
+        SetViewComment x => x.NewComment is null
+            ? $"""COMMENT ON VIEW "{x.SchemaName}"."{x.ViewName}" IS NULL"""
+            : $"""COMMENT ON VIEW "{x.SchemaName}"."{x.ViewName}" IS $comment${x.NewComment}$comment$""",
         SetSchemaComment x => x.NewComment is null
             ? $"""COMMENT ON SCHEMA "{x.SchemaName}" IS NULL"""
             : $"""COMMENT ON SCHEMA "{x.SchemaName}" IS $comment${x.NewComment}$comment$""",

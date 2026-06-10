@@ -32,11 +32,14 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         var constraintComments = await QueryConstraintComments(conn, schemas, cancellationToken);
         var schemaGrants = await QuerySchemaGrants(conn, schemas, cancellationToken);
         var tableGrants = await QueryTableGrants(conn, schemas, cancellationToken);
+        var views = await QueryViews(conn, schemas, cancellationToken);
+        var viewComments = await QueryViewComments(conn, schemas, cancellationToken);
+        var viewDependencies = await QueryViewDependencies(conn, schemas, cancellationToken);
 
         return Build(
             tables, columns, primaryKeys, foreignKeys, uniqueConstraints, checkConstraints, indexes,
             schemaComments, tableComments, columnComments, indexComments, constraintComments,
-            schemaGrants, tableGrants
+            schemaGrants, tableGrants, views, viewComments, viewDependencies
         );
     }
 
@@ -610,6 +613,114 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         return rows;
     }
 
+    private static async Task<List<ViewRow>> QueryViews(NpgsqlConnection conn, string[]? schemas, CancellationToken ct)
+    {
+        var rows = new List<ViewRow>();
+        await using var cmd = conn.CreateCommand();
+        // relkind 'v' = plain views (materialized views, 'm', are not part of the model). pg_get_viewdef returns the
+        // canonical definition — this is what makes apply → plan round-trip cleanly: state captures the DB's own form.
+        cmd.CommandText = """
+            SELECT n.nspname AS schema_name,
+                   c.relname AS view_name,
+                   pg_get_viewdef(c.oid) AS definition
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.relkind = 'v'
+            AND (@schemas::text[] IS NULL OR n.nspname = ANY(@schemas))
+            AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+            AND n.nspname NOT LIKE 'pg\_toast%' ESCAPE '\'
+            AND n.nspname NOT LIKE 'pg\_temp%' ESCAPE '\'
+            ORDER BY n.nspname, c.relname
+            """;
+        AddSchemasParameter(cmd, schemas);
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows.Add(new ViewRow(reader.GetString(0), reader.GetString(1), CleanViewBody(reader.GetString(2))));
+        }
+
+        return rows;
+    }
+
+    // pg_get_viewdef pretty-prints the SELECT and terminates it with ';'. Strip the wrapping whitespace and trailing
+    // terminator so the stored body matches the form the DSL writer emits (it appends its own ';').
+    private static string CleanViewBody(string definition)
+    {
+        var body = definition.Trim();
+        return body.EndsWith(';') ? body[..^1].TrimEnd() : body;
+    }
+
+    private static async Task<Dictionary<(string, string), string?>> QueryViewComments(NpgsqlConnection conn, string[]? schemas, CancellationToken ct)
+    {
+        var result = new Dictionary<(string, string), string?>();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT n.nspname, c.relname, d.description
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            LEFT JOIN pg_description d
+                ON d.objoid = c.oid
+                AND d.classoid = 'pg_class'::regclass
+                AND d.objsubid = 0
+            WHERE (@schemas::text[] IS NULL OR n.nspname = ANY(@schemas))
+            AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+            AND n.nspname NOT LIKE 'pg\_toast%' ESCAPE '\'
+            AND n.nspname NOT LIKE 'pg\_temp%' ESCAPE '\'
+            AND c.relkind = 'v'
+            ORDER BY n.nspname, c.relname
+            """;
+        AddSchemasParameter(cmd, schemas);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            result[(reader.GetString(0), reader.GetString(1))] = reader.IsDBNull(2) ? null : reader.GetString(2);
+        }
+
+        return result;
+    }
+
+    private static async Task<List<ViewDependencyRow>> QueryViewDependencies(NpgsqlConnection conn, string[]? schemas, CancellationToken ct)
+    {
+        var rows = new List<ViewDependencyRow>();
+        await using var cmd = conn.CreateCommand();
+        // A view reads other relations through its rewrite rule (pg_rewrite), which depends on those relations via
+        // pg_depend. DISTINCT collapses the per-column rows to one per referenced relation; a view depends on its own
+        // columns, so the self-reference is excluded. Refs may live in any schema (cross-schema ordering is real).
+        cmd.CommandText = """
+            SELECT DISTINCT
+                vn.nspname AS view_schema,
+                v.relname  AS view_name,
+                dn.nspname AS ref_schema,
+                d.relname  AS ref_name
+            FROM pg_rewrite r
+            JOIN pg_class     v  ON v.oid  = r.ev_class
+            JOIN pg_namespace vn ON vn.oid = v.relnamespace
+            JOIN pg_depend    dep ON dep.objid = r.oid
+                                 AND dep.classid    = 'pg_rewrite'::regclass
+                                 AND dep.refclassid = 'pg_class'::regclass
+            JOIN pg_class     d  ON d.oid  = dep.refobjid
+            JOIN pg_namespace dn ON dn.oid = d.relnamespace
+            WHERE v.relkind = 'v'
+            AND d.relkind IN ('r', 'v', 'm')
+            AND d.oid <> v.oid
+            AND (@schemas::text[] IS NULL OR vn.nspname = ANY(@schemas))
+            AND vn.nspname NOT IN ('pg_catalog', 'information_schema')
+            AND vn.nspname NOT LIKE 'pg\_toast%' ESCAPE '\'
+            AND vn.nspname NOT LIKE 'pg\_temp%' ESCAPE '\'
+            ORDER BY vn.nspname, v.relname, dn.nspname, d.relname
+            """;
+        AddSchemasParameter(cmd, schemas);
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows.Add(new ViewDependencyRow(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3)));
+        }
+
+        return rows;
+    }
+
     // ── Model assembly ────────────────────────────────────────────────────────
 
     private static DatabaseSchema Build(
@@ -626,7 +737,10 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         Dictionary<(string, string), string?> indexComments,
         Dictionary<(string, string, string), string?> constraintComments,
         List<SchemaGrantRow> schemaGrants,
-        List<TableGrantRow> tableGrants
+        List<TableGrantRow> tableGrants,
+        List<ViewRow> views,
+        Dictionary<(string, string), string?> viewComments,
+        List<ViewDependencyRow> viewDependencies
     )
     {
         var bySchema = tables
@@ -635,9 +749,16 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
                 g => g.Key,
                 g => g.Select(t => BuildTable(t, columns, primaryKeys, foreignKeys, uniqueConstraints, checkConstraints, indexes, tableComments, columnComments, indexComments, constraintComments, tableGrants)).ToList());
 
+        var viewsBySchema = views
+            .GroupBy(v => v.Schema)
+            .ToDictionary(
+                g => g.Key,
+                g => g.Select(v => BuildView(v, viewComments, viewDependencies)).ToList());
+
         // Drive schema list from what actually exists in the database, not from what was requested.
         var existingSchemas = schemaComments.Keys
             .Union(bySchema.Keys)
+            .Union(viewsBySchema.Keys)
             .Union(schemaGrants.Select(g => g.SchemaName))
             .Distinct(StringComparer.OrdinalIgnoreCase);
 
@@ -648,11 +769,25 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
                     .Where(g => g.SchemaName == name)
                     .Select(g => new SchemaGrant(g.Role))
                     .ToList();
-                return new SchemaDefinition(name, null, false, schemaComments.GetValueOrDefault(name), bySchema.GetValueOrDefault(name, []), [], grants);
+                return new SchemaDefinition(name, null, false, schemaComments.GetValueOrDefault(name),
+                    bySchema.GetValueOrDefault(name, []), [], grants, viewsBySchema.GetValueOrDefault(name, []));
             })
             .ToList();
 
         return new DatabaseSchema(dbSchemas, []);
+    }
+
+    private static View BuildView(
+        ViewRow row,
+        Dictionary<(string, string), string?> viewComments,
+        List<ViewDependencyRow> viewDependencies)
+    {
+        var dependsOn = viewDependencies
+            .Where(d => d.ViewSchema == row.Schema && d.ViewName == row.Name)
+            .Select(d => new ViewDependency(d.RefSchema, d.RefName))
+            .ToList();
+        viewComments.TryGetValue((row.Schema, row.Name), out var comment);
+        return new View(row.Name, row.Definition, OldName: null, Comment: comment, DependsOn: dependsOn);
     }
 
     private static Table BuildTable(
@@ -716,16 +851,16 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
             .ToList();
 
         // Named args keep this resilient to new Table members.
-        return Table.Create(
+        return new Table(
             tableRow.Name,
-            primaryKey: pk,
-            comment: tableComment,
-            columns: cols,
-            foreignKeys: fks,
-            uniqueConstraints: uniques,
-            checkConstraints: checks,
-            indexes: idxs,
-            grants: grants
+            PrimaryKey: pk,
+            Comment: tableComment,
+            Columns: cols,
+            ForeignKeys: fks,
+            UniqueConstraints: uniques,
+            CheckConstraints: checks,
+            Indexes: idxs,
+            Grants: grants
         );
     }
 
