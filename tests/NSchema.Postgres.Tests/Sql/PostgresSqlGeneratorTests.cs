@@ -613,6 +613,290 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         exists.ShouldBeTrue();
     }
 
+    // ── Enums ─────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task CreateEnum_CreatesTypeWithValuesInOrder()
+    {
+        // Arrange — includes an apostrophe to prove literal escaping.
+        var action = new CreateEnum(_schema, new EnumType("order_status", ["pending", "shipped", "won't_ship"]));
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan([action], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        (await EnumLabels("order_status")).ShouldBe("pending,shipped,won't_ship");
+    }
+
+    [Fact]
+    public async Task AddEnumValue_AppendsToEnd()
+    {
+        // Arrange
+        await Exec($"""CREATE TYPE "{_schema}".order_status AS ENUM ('a', 'b')""");
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new AddEnumValue(_schema, "order_status", "c")], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        (await EnumLabels("order_status")).ShouldBe("a,b,c");
+    }
+
+    [Fact]
+    public async Task AddEnumValue_Before_InsertsBeforeAnchor()
+    {
+        // Arrange
+        await Exec($"""CREATE TYPE "{_schema}".order_status AS ENUM ('b', 'c')""");
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new AddEnumValue(_schema, "order_status", "a", Before: "b")], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        (await EnumLabels("order_status")).ShouldBe("a,b,c");
+    }
+
+    [Fact]
+    public async Task AddEnumValue_After_InsertsAfterAnchor()
+    {
+        // Arrange
+        await Exec($"""CREATE TYPE "{_schema}".order_status AS ENUM ('a', 'c')""");
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new AddEnumValue(_schema, "order_status", "b", After: "a")], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        (await EnumLabels("order_status")).ShouldBe("a,b,c");
+    }
+
+    [Fact]
+    public async Task RenameEnum_RenamesType()
+    {
+        // Arrange
+        await Exec($"""CREATE TYPE "{_schema}".order_state AS ENUM ('a')""");
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new RenameEnum(_schema, "order_state", "order_status")], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        (await EnumLabels("order_status")).ShouldBe("a");
+    }
+
+    [Fact]
+    public async Task SetEnumComment_SetsAndClearsComment()
+    {
+        // Arrange
+        await Exec($"""CREATE TYPE "{_schema}".order_status AS ENUM ('a')""");
+        var commentSql = $"""
+            SELECT obj_description(t.oid, 'pg_type')
+            FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+            WHERE n.nspname = '{_schema}' AND t.typname = 'order_status'
+            """;
+
+        // Act + Assert — set...
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new SetEnumComment(_schema, "order_status", null, "lifecycle")], [], [])), TestContext.Current.CancellationToken);
+        (await ScalarString(commentSql)).ShouldBe("lifecycle");
+
+        // ...and clear.
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new SetEnumComment(_schema, "order_status", "lifecycle", null)], [], [])), TestContext.Current.CancellationToken);
+        (await ScalarBool($"SELECT ({commentSql}) IS NULL")).ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task DropEnum_RemovesType()
+    {
+        // Arrange
+        await Exec($"""CREATE TYPE "{_schema}".order_status AS ENUM ('a')""");
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new DropEnum(_schema, "order_status")], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        var exists = await ScalarBool($"""
+            SELECT COUNT(*) > 0 FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+            WHERE n.nspname = '{_schema}' AND t.typname = 'order_status'
+            """);
+        exists.ShouldBeFalse();
+    }
+
+    // ── Sequences ─────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task CreateSequence_Bare_CreatesSequenceWithEngineDefaults()
+    {
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new CreateSequence(_schema, new Sequence("order_id"))], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        (await SequenceCatalogValues("order_id")).ShouldBe("bigint,1,1,1,9223372036854775807,1,false");
+    }
+
+    [Fact]
+    public async Task CreateSequence_WithOptions_AppliesEveryOption()
+    {
+        // Arrange
+        var sequence = new Sequence("invoice_id", new SequenceOptions(
+            SqlType.Int, StartWith: 20, IncrementBy: 5, MinValue: 10, MaxValue: 1000, Cache: 10, Cycle: true));
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new CreateSequence(_schema, sequence)], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        (await SequenceCatalogValues("invoice_id")).ShouldBe("integer,20,5,10,1000,10,true");
+    }
+
+    [Fact]
+    public async Task AlterSequence_ChangesOptions()
+    {
+        // Arrange
+        await Exec($"""CREATE SEQUENCE "{_schema}".order_id""");
+        var action = new AlterSequence(_schema, "order_id",
+            OldOptions: new SequenceOptions(),
+            NewOptions: new SequenceOptions(IncrementBy: 5, MaxValue: 1000, Cycle: true));
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan([action], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        (await SequenceCatalogValues("order_id")).ShouldBe("bigint,1,5,1,1000,1,true");
+    }
+
+    [Fact]
+    public async Task AlterSequence_ResetsOptionsToEngineDefaults()
+    {
+        // Arrange — exercises every explicit reset form (AS bigint, INCREMENT BY 1, NO MINVALUE, NO MAXVALUE,
+        // START WITH <computed>, CACHE 1, NO CYCLE).
+        await Exec($"""CREATE SEQUENCE "{_schema}".order_id AS integer INCREMENT 5 MINVALUE 10 MAXVALUE 1000 START 20 CACHE 10 CYCLE""");
+        var action = new AlterSequence(_schema, "order_id",
+            OldOptions: new SequenceOptions(SqlType.Int, StartWith: 20, IncrementBy: 5, MinValue: 10, MaxValue: 1000, Cache: 10, Cycle: true),
+            NewOptions: new SequenceOptions());
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan([action], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        (await SequenceCatalogValues("order_id")).ShouldBe("bigint,1,1,1,9223372036854775807,1,false");
+    }
+
+    [Fact]
+    public async Task RenameSequence_RenamesSequence()
+    {
+        // Arrange
+        await Exec($"""CREATE SEQUENCE "{_schema}".bill_id""");
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new RenameSequence(_schema, "bill_id", "invoice_id")], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        var exists = await ScalarBool($"""
+            SELECT COUNT(*) > 0 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.relkind = 'S' AND n.nspname = '{_schema}' AND c.relname = 'invoice_id'
+            """);
+        exists.ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task SetSequenceComment_SetsAndClearsComment()
+    {
+        // Arrange
+        await Exec($"""CREATE SEQUENCE "{_schema}".order_id""");
+        var commentSql = $"""
+            SELECT obj_description(c.oid, 'pg_class')
+            FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.relkind = 'S' AND n.nspname = '{_schema}' AND c.relname = 'order_id'
+            """;
+
+        // Act + Assert — set...
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new SetSequenceComment(_schema, "order_id", null, "order numbers")], [], [])), TestContext.Current.CancellationToken);
+        (await ScalarString(commentSql)).ShouldBe("order numbers");
+
+        // ...and clear.
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new SetSequenceComment(_schema, "order_id", "order numbers", null)], [], [])), TestContext.Current.CancellationToken);
+        (await ScalarBool($"SELECT ({commentSql}) IS NULL")).ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task DropSequence_RemovesSequence()
+    {
+        // Arrange
+        await Exec($"""CREATE SEQUENCE "{_schema}".order_id""");
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new DropSequence(_schema, "order_id")], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        var exists = await ScalarBool($"""
+            SELECT COUNT(*) > 0 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.relkind = 'S' AND n.nspname = '{_schema}' AND c.relname = 'order_id'
+            """);
+        exists.ShouldBeFalse();
+    }
+
+    // ── Round-trips (generate → execute → introspect) ─────────────────────────
+
+    [Fact]
+    public async Task RoundTrip_FullyOptionedSequence_IntrospectsToSameOptions()
+    {
+        // Arrange
+        var options = new SequenceOptions(SqlType.Int, StartWith: 20, IncrementBy: 5, MinValue: 10, MaxValue: 1000, Cache: 10, Cycle: true);
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new CreateSequence(_schema, new Sequence("order_id", options))], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert — what was applied is exactly what introspection reads back, so plan shows no drift.
+        var provider = new PostgresSchemaProvider(_dataSource);
+        var sequence = (await provider.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Sequences.ShouldHaveSingleItem();
+        sequence.Options.ShouldBe(options);
+    }
+
+    [Fact]
+    public async Task RoundTrip_BareSequence_IntrospectsToAllNullOptions()
+    {
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new CreateSequence(_schema, new Sequence("order_id"))], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        var provider = new PostgresSchemaProvider(_dataSource);
+        var sequence = (await provider.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Sequences.ShouldHaveSingleItem();
+        sequence.Options.ShouldBe(new SequenceOptions());
+    }
+
+    [Fact]
+    public async Task RoundTrip_EnumWithAnchoredAdditions_IntrospectsToDesiredOrder()
+    {
+        // Arrange — mirrors what the core comparer plans for ['a','c'] → ['a','b','c','d'].
+        var plan = new MigrationPlan(
+            [
+                new CreateEnum(_schema, new EnumType("order_status", ["a", "c"])),
+                new AddEnumValue(_schema, "order_status", "b", Before: "c"),
+                new AddEnumValue(_schema, "order_status", "d", After: "c"),
+            ], [], []);
+
+        // Act
+        await _executor.Execute(_generator.Generate(plan), TestContext.Current.CancellationToken);
+
+        // Assert
+        var provider = new PostgresSchemaProvider(_dataSource);
+        var enumType = (await provider.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Enums.ShouldHaveSingleItem();
+        enumType.Values.ShouldBe(["a", "b", "c", "d"]);
+    }
+
     // Transaction/rollback semantics are the core executor's behaviour (DefaultSqlExecutor, now internal) and are
     // tested in the core, not here — this suite covers the Postgres SQL the generator emits.
 
@@ -652,4 +936,23 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         cmd.CommandText = sql;
         return (string)(await cmd.ExecuteScalarAsync())!;
     }
+
+    /// <summary>The enum's labels in comparison order, comma-joined.</summary>
+    private Task<string> EnumLabels(string enumName) => ScalarString($"""
+        SELECT string_agg(e.enumlabel, ',' ORDER BY e.enumsortorder)
+        FROM pg_enum e
+        JOIN pg_type t ON t.oid = e.enumtypid
+        JOIN pg_namespace n ON n.oid = t.typnamespace
+        WHERE n.nspname = '{_schema}' AND t.typname = '{enumName}'
+        """);
+
+    /// <summary>The sequence's raw catalog values: type,start,increment,min,max,cache,cycle.</summary>
+    private Task<string> SequenceCatalogValues(string sequenceName) => ScalarString($"""
+        SELECT format_type(s.seqtypid, NULL) || ',' || s.seqstart || ',' || s.seqincrement || ',' ||
+               s.seqmin || ',' || s.seqmax || ',' || s.seqcache || ',' || s.seqcycle
+        FROM pg_sequence s
+        JOIN pg_class c ON c.oid = s.seqrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = '{_schema}' AND c.relname = '{sequenceName}'
+        """);
 }

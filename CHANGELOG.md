@@ -15,6 +15,8 @@ As a consequence, breaking changes that are specific to this provider (rather th
 ### Added
 
 - `NSchemaApplicationBuilder.AddPostgresGenerator` extension for registering only the Postrges SQL generator and not the provider.
+- Enum type support, matching NSchema.Core 3.0.0's enum model. Introspection reads enum types and their value order from `pg_type`/`pg_enum` (plus comments); the generator emits `CREATE TYPE … AS ENUM`, `DROP TYPE`, `ALTER TYPE … RENAME TO`, `COMMENT ON TYPE`, and anchored `ALTER TYPE … ADD VALUE [BEFORE|AFTER …]`. `ADD VALUE` statements are marked to run outside the migration transaction (Postgres forbids using a value added in the same uncommitted transaction); the executor carves them out in order, so later statements that use the value still run after it.
+- Standalone sequence support. Introspection reads sequences from `pg_sequence` — excluding column-owned sequences (identity, serial, and `OWNED BY`, via `pg_depend` deptype `'i'`/`'a'`) — and folds Postgres engine defaults to `null` so a bare `CREATE SEQUENCE` declaration round-trips with no phantom drift. The generator emits `CREATE SEQUENCE` with only the declared options, `DROP SEQUENCE`, `ALTER SEQUENCE … RENAME TO`, `COMMENT ON SEQUENCE`, and a delta-based `ALTER SEQUENCE` where an option removed from the declaration resets explicitly to its engine default. Note: a desired schema that explicitly declares an engine default (e.g. `START 1` on an ascending sequence) will show drift against the normalized form — omit the option instead.
 
 ### Changed
 

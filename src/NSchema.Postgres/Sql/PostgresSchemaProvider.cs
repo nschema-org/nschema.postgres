@@ -35,11 +35,16 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         var views = await QueryViews(conn, schemas, cancellationToken);
         var viewComments = await QueryViewComments(conn, schemas, cancellationToken);
         var viewDependencies = await QueryViewDependencies(conn, schemas, cancellationToken);
+        var enums = await QueryEnums(conn, schemas, cancellationToken);
+        var enumComments = await QueryEnumComments(conn, schemas, cancellationToken);
+        var sequences = await QuerySequences(conn, schemas, cancellationToken);
+        var sequenceComments = await QuerySequenceComments(conn, schemas, cancellationToken);
 
         return Build(
             tables, columns, primaryKeys, foreignKeys, uniqueConstraints, checkConstraints, indexes,
             schemaComments, tableComments, columnComments, indexComments, constraintComments,
-            schemaGrants, tableGrants, views, viewComments, viewDependencies
+            schemaGrants, tableGrants, views, viewComments, viewDependencies,
+            enums, enumComments, sequences, sequenceComments
         );
     }
 
@@ -721,6 +726,145 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         return rows;
     }
 
+    private static async Task<List<EnumRow>> QueryEnums(NpgsqlConnection conn, string[]? schemas, CancellationToken ct)
+    {
+        var rows = new List<EnumRow>();
+        await using var cmd = conn.CreateCommand();
+        // typtype 'e' = enum types. LEFT JOIN + FILTER so a zero-value enum (legal in Postgres) still surfaces.
+        // enumsortorder is the type's comparison order — the model's value order must match it exactly.
+        cmd.CommandText = """
+            SELECT n.nspname AS schema_name,
+                   t.typname AS enum_name,
+                   coalesce(array_agg(e.enumlabel::text ORDER BY e.enumsortorder)
+                            FILTER (WHERE e.enumlabel IS NOT NULL), '{}') AS values
+            FROM pg_type t
+            JOIN pg_namespace n ON n.oid = t.typnamespace
+            LEFT JOIN pg_enum e ON e.enumtypid = t.oid
+            WHERE t.typtype = 'e'
+            AND (@schemas::text[] IS NULL OR n.nspname = ANY(@schemas))
+            AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+            AND n.nspname NOT LIKE 'pg\_toast%' ESCAPE '\'
+            AND n.nspname NOT LIKE 'pg\_temp%' ESCAPE '\'
+            GROUP BY n.nspname, t.typname
+            ORDER BY n.nspname, t.typname
+            """;
+        AddSchemasParameter(cmd, schemas);
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows.Add(new EnumRow(reader.GetString(0), reader.GetString(1), reader.GetFieldValue<string[]>(2)));
+        }
+
+        return rows;
+    }
+
+    private static async Task<Dictionary<(string, string), string?>> QueryEnumComments(NpgsqlConnection conn, string[]? schemas, CancellationToken ct)
+    {
+        var result = new Dictionary<(string, string), string?>();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT n.nspname, t.typname, d.description
+            FROM pg_type t
+            JOIN pg_namespace n ON n.oid = t.typnamespace
+            LEFT JOIN pg_description d
+                ON d.objoid = t.oid
+                AND d.classoid = 'pg_type'::regclass
+                AND d.objsubid = 0
+            WHERE t.typtype = 'e'
+            AND (@schemas::text[] IS NULL OR n.nspname = ANY(@schemas))
+            AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+            AND n.nspname NOT LIKE 'pg\_toast%' ESCAPE '\'
+            AND n.nspname NOT LIKE 'pg\_temp%' ESCAPE '\'
+            ORDER BY n.nspname, t.typname
+            """;
+        AddSchemasParameter(cmd, schemas);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            result[(reader.GetString(0), reader.GetString(1))] = reader.IsDBNull(2) ? null : reader.GetString(2);
+        }
+
+        return result;
+    }
+
+    private static async Task<List<SequenceRow>> QuerySequences(NpgsqlConnection conn, string[]? schemas, CancellationToken ct)
+    {
+        var rows = new List<SequenceRow>();
+        await using var cmd = conn.CreateCommand();
+        // Only standalone sequences belong to the schema model. Owned sequences are a column's implementation
+        // detail and are excluded via pg_depend: deptype 'i' (identity) and 'a' (serial — and, by the same token,
+        // a user sequence later attached via ALTER SEQUENCE … OWNED BY, which transfers its lifecycle to the column).
+        cmd.CommandText = """
+            SELECT n.nspname AS schema_name,
+                   c.relname AS sequence_name,
+                   format_type(s.seqtypid, NULL) AS data_type,
+                   s.seqstart,
+                   s.seqincrement,
+                   s.seqmin,
+                   s.seqmax,
+                   s.seqcache,
+                   s.seqcycle
+            FROM pg_sequence s
+            JOIN pg_class c ON c.oid = s.seqrelid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE (@schemas::text[] IS NULL OR n.nspname = ANY(@schemas))
+            AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+            AND n.nspname NOT LIKE 'pg\_toast%' ESCAPE '\'
+            AND n.nspname NOT LIKE 'pg\_temp%' ESCAPE '\'
+            AND NOT EXISTS (
+                SELECT 1
+                FROM pg_depend dep
+                WHERE dep.classid = 'pg_class'::regclass
+                AND dep.objid = c.oid
+                AND dep.refclassid = 'pg_class'::regclass
+                AND dep.deptype IN ('a', 'i')
+            )
+            ORDER BY n.nspname, c.relname
+            """;
+        AddSchemasParameter(cmd, schemas);
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows.Add(new SequenceRow(
+                reader.GetString(0), reader.GetString(1), reader.GetString(2),
+                reader.GetInt64(3), reader.GetInt64(4), reader.GetInt64(5), reader.GetInt64(6), reader.GetInt64(7),
+                reader.GetBoolean(8)));
+        }
+
+        return rows;
+    }
+
+    private static async Task<Dictionary<(string, string), string?>> QuerySequenceComments(NpgsqlConnection conn, string[]? schemas, CancellationToken ct)
+    {
+        var result = new Dictionary<(string, string), string?>();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT n.nspname, c.relname, d.description
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            LEFT JOIN pg_description d
+                ON d.objoid = c.oid
+                AND d.classoid = 'pg_class'::regclass
+                AND d.objsubid = 0
+            WHERE (@schemas::text[] IS NULL OR n.nspname = ANY(@schemas))
+            AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+            AND n.nspname NOT LIKE 'pg\_toast%' ESCAPE '\'
+            AND n.nspname NOT LIKE 'pg\_temp%' ESCAPE '\'
+            AND c.relkind = 'S'
+            ORDER BY n.nspname, c.relname
+            """;
+        AddSchemasParameter(cmd, schemas);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            result[(reader.GetString(0), reader.GetString(1))] = reader.IsDBNull(2) ? null : reader.GetString(2);
+        }
+
+        return result;
+    }
+
     // ── Model assembly ────────────────────────────────────────────────────────
 
     private static DatabaseSchema Build(
@@ -740,7 +884,11 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         List<TableGrantRow> tableGrants,
         List<ViewRow> views,
         Dictionary<(string, string), string?> viewComments,
-        List<ViewDependencyRow> viewDependencies
+        List<ViewDependencyRow> viewDependencies,
+        List<EnumRow> enums,
+        Dictionary<(string, string), string?> enumComments,
+        List<SequenceRow> sequences,
+        Dictionary<(string, string), string?> sequenceComments
     )
     {
         var bySchema = tables
@@ -755,10 +903,26 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
                 g => g.Key,
                 g => g.Select(v => BuildView(v, viewComments, viewDependencies)).ToList());
 
+        var enumsBySchema = enums
+            .GroupBy(e => e.Schema)
+            .ToDictionary(
+                g => g.Key,
+                g => g.Select(e => new EnumType(e.Name, e.Values, OldName: null,
+                    Comment: enumComments.GetValueOrDefault((e.Schema, e.Name)))).ToList());
+
+        var sequencesBySchema = sequences
+            .GroupBy(s => s.Schema)
+            .ToDictionary(
+                g => g.Key,
+                g => g.Select(s => new Sequence(s.Name, NormalizeSequenceOptions(s), OldName: null,
+                    Comment: sequenceComments.GetValueOrDefault((s.Schema, s.Name)))).ToList());
+
         // Drive schema list from what actually exists in the database, not from what was requested.
         var existingSchemas = schemaComments.Keys
             .Union(bySchema.Keys)
             .Union(viewsBySchema.Keys)
+            .Union(enumsBySchema.Keys)
+            .Union(sequencesBySchema.Keys)
             .Union(schemaGrants.Select(g => g.SchemaName))
             .Distinct(StringComparer.OrdinalIgnoreCase);
 
@@ -770,11 +934,46 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
                     .Select(g => new SchemaGrant(g.Role))
                     .ToList();
                 return new SchemaDefinition(name, null, false, schemaComments.GetValueOrDefault(name),
-                    bySchema.GetValueOrDefault(name, []), [], grants, viewsBySchema.GetValueOrDefault(name, []));
+                    bySchema.GetValueOrDefault(name, []), [], grants, viewsBySchema.GetValueOrDefault(name, []),
+                    DroppedViews: [],
+                    Enums: enumsBySchema.GetValueOrDefault(name, []),
+                    DroppedEnums: [],
+                    Sequences: sequencesBySchema.GetValueOrDefault(name, []),
+                    DroppedSequences: []);
             })
             .ToList();
 
         return new DatabaseSchema(dbSchemas, []);
+    }
+
+    // Postgres engine defaults are folded to null so a bare "CREATE SEQUENCE" round-trips to an all-null
+    // SequenceOptions and the core's plain record equality sees no drift. Documented trade-off: a desired schema
+    // that *explicitly* declares an engine default (e.g. START 1 on an ascending sequence) shows drift against the
+    // normalized null; the fix is to omit the option.
+    internal static SequenceOptions NormalizeSequenceOptions(SequenceRow row)
+    {
+        var ascending = row.Increment > 0;
+        var (typeMin, typeMax) = row.DataType switch
+        {
+            "smallint" => ((long)short.MinValue, (long)short.MaxValue),
+            "integer" => ((long)int.MinValue, (long)int.MaxValue),
+            _ => (long.MinValue, long.MaxValue), // bigint
+        };
+
+        var defaultMin = ascending ? 1L : typeMin;
+        var defaultMax = ascending ? typeMax : -1L;
+        // The default start is the sequence's *effective* minvalue (ascending) / maxvalue (descending), not the
+        // default min/max — CREATE SEQUENCE q MINVALUE 5 starts at 5.
+        var defaultStart = ascending ? row.MinValue : row.MaxValue;
+
+        return new SequenceOptions(
+            DataType: row.DataType == "bigint" ? null : SqlType.Parse(row.DataType),
+            StartWith: row.Start == defaultStart ? null : row.Start,
+            IncrementBy: row.Increment == 1 ? null : row.Increment,
+            MinValue: row.MinValue == defaultMin ? null : row.MinValue,
+            MaxValue: row.MaxValue == defaultMax ? null : row.MaxValue,
+            Cache: row.Cache == 1 ? null : row.Cache,
+            Cycle: row.Cycle);
     }
 
     private static View BuildView(
