@@ -571,6 +571,54 @@ public sealed class PostgresSchemaProviderTests(PostgresContainerFixture fixture
         check.Comment.ShouldBe("no overdrafts");
     }
 
+    // ── Table grants ──────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task GetSchema_TableGrants_ExcludeOwnerImplicitGrants()
+    {
+        // Arrange — the owner implicitly holds all privileges. Those must not surface as grants, or they would read
+        // as drift against a desired schema that never declares the owner's own access.
+        await Exec($"""
+            CREATE TABLE "{_schema}".users (
+                id INTEGER NOT NULL
+            )
+            """);
+
+        // Act
+        var table = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken)).Schemas[0].Tables[0];
+
+        // Assert
+        table.Grants.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task GetSchema_TableGrants_ReturnsExplicitGrantToOtherRole()
+    {
+        // Arrange — an explicit grant to a non-owner role should be captured.
+        var role = $"role_{Guid.NewGuid():N}";
+        await Exec($"""CREATE ROLE "{role}" """);
+        try
+        {
+            await Exec($"""
+                CREATE TABLE "{_schema}".users (id INTEGER NOT NULL);
+                GRANT SELECT, INSERT ON "{_schema}".users TO "{role}";
+                """);
+
+            // Act
+            var grants = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken))
+                .Schemas[0].Tables[0].Grants;
+
+            // Assert
+            var grant = grants.ShouldHaveSingleItem();
+            grant.Role.ShouldBe(role);
+            grant.Privileges.ShouldBe(TablePrivilege.Select | TablePrivilege.Insert);
+        }
+        finally
+        {
+            await Exec($"""DROP OWNED BY "{role}"; DROP ROLE "{role}" """);
+        }
+    }
+
     [Fact]
     public async Task GetSchema_ForeignKeyComment_IsCaptured()
     {

@@ -578,16 +578,27 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
     {
         var rows = new List<TableGrantRow>();
         await using var cmd = conn.CreateCommand();
+        // Read from pg_class.relacl (via aclexplode) rather than information_schema.role_table_grants so we can see
+        // the grantee's oid and exclude the table owner. The owner holds all privileges implicitly, and
+        // information_schema surfaces those as ordinary grants — which would otherwise read as drift against a
+        // desired schema that (correctly) never declares the owner's own access. PUBLIC (grantee 0) is excluded too.
         cmd.CommandText = """
-            SELECT table_schema, table_name, grantee, privilege_type
-            FROM information_schema.role_table_grants
-            WHERE (@schemas::text[] IS NULL OR table_schema = ANY(@schemas))
-            AND table_schema NOT IN ('pg_catalog', 'information_schema')
-            AND table_schema NOT LIKE 'pg\_toast%' ESCAPE '\'
-            AND table_schema NOT LIKE 'pg\_temp%' ESCAPE '\'
-            AND privilege_type IN ('SELECT', 'INSERT', 'UPDATE', 'DELETE')
-            AND grantee != 'PUBLIC'
-            ORDER BY table_schema, table_name, grantee, privilege_type
+            SELECT n.nspname AS table_schema,
+                   c.relname AS table_name,
+                   acl.grantee::regrole::text AS role,
+                   acl.privilege_type
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            CROSS JOIN LATERAL aclexplode(c.relacl) AS acl(grantor, grantee, privilege_type, is_grantable)
+            WHERE c.relkind = 'r'
+            AND (@schemas::text[] IS NULL OR n.nspname = ANY(@schemas))
+            AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+            AND n.nspname NOT LIKE 'pg\_toast%' ESCAPE '\'
+            AND n.nspname NOT LIKE 'pg\_temp%' ESCAPE '\'
+            AND acl.privilege_type IN ('SELECT', 'INSERT', 'UPDATE', 'DELETE')
+            AND acl.grantee <> 0
+            AND acl.grantee <> c.relowner
+            ORDER BY n.nspname, c.relname, role, acl.privilege_type
             """;
         AddSchemasParameter(cmd, schemas);
         await using var reader = await cmd.ExecuteReaderAsync(ct);
