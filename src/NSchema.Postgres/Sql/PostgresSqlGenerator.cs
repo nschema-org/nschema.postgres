@@ -13,12 +13,21 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
     {
         var preDeploymentStatements = plan.PreDeploymentScripts.Select(s => new SqlStatement(s.Sql, s.RunOutsideTransaction));
         var postDeploymentStatements = plan.PostDeploymentScripts.Select(s => new SqlStatement(s.Sql, s.RunOutsideTransaction));
-        var statements = plan.Actions.Select(s => new SqlStatement(GenerateSql(s))).ToList();
+        var statements = plan.Actions.Select(GenerateStatement).ToList();
         List<SqlStatement> allStatements = [.. preDeploymentStatements, .. statements, .. postDeploymentStatements];
         return new SqlPlan(allStatements);
     }
 
     // ── SQL generation ────────────────────────────────────────────────────────
+
+    private static SqlStatement GenerateStatement(MigrationAction action) => action switch
+    {
+        // A value added by ALTER TYPE … ADD VALUE cannot be used until the transaction that added it commits, so
+        // the statement is carved out of the surrounding transaction. The executor commits the pending segment,
+        // runs it alone, and resumes — ordering relative to later statements that use the value is preserved.
+        AddEnumValue x => new SqlStatement(BuildAddEnumValue(x), RunOutsideTransaction: true),
+        _ => new SqlStatement(GenerateSql(action)),
+    };
 
     private static string GenerateSql(MigrationAction action) => action switch
     {
@@ -56,6 +65,19 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
         SetViewComment x => x.NewComment is null
             ? $"""COMMENT ON VIEW "{x.SchemaName}"."{x.ViewName}" IS NULL"""
             : $"""COMMENT ON VIEW "{x.SchemaName}"."{x.ViewName}" IS $comment${x.NewComment}$comment$""",
+        CreateEnum x => BuildCreateEnum(x),
+        DropEnum x => $"DROP TYPE \"{x.SchemaName}\".\"{x.EnumName}\"",
+        RenameEnum x => $"ALTER TYPE \"{x.SchemaName}\".\"{x.OldName}\" RENAME TO \"{x.NewName}\"",
+        SetEnumComment x => x.NewComment is null
+            ? $"""COMMENT ON TYPE "{x.SchemaName}"."{x.EnumName}" IS NULL"""
+            : $"""COMMENT ON TYPE "{x.SchemaName}"."{x.EnumName}" IS $comment${x.NewComment}$comment$""",
+        CreateSequence x => BuildCreateSequence(x),
+        DropSequence x => $"DROP SEQUENCE \"{x.SchemaName}\".\"{x.SequenceName}\"",
+        RenameSequence x => $"ALTER SEQUENCE \"{x.SchemaName}\".\"{x.OldName}\" RENAME TO \"{x.NewName}\"",
+        AlterSequence x => BuildAlterSequence(x),
+        SetSequenceComment x => x.NewComment is null
+            ? $"""COMMENT ON SEQUENCE "{x.SchemaName}"."{x.SequenceName}" IS NULL"""
+            : $"""COMMENT ON SEQUENCE "{x.SchemaName}"."{x.SequenceName}" IS $comment${x.NewComment}$comment$""",
         SetSchemaComment x => x.NewComment is null
             ? $"""COMMENT ON SCHEMA "{x.SchemaName}" IS NULL"""
             : $"""COMMENT ON SCHEMA "{x.SchemaName}" IS $comment${x.NewComment}$comment$""",
@@ -169,6 +191,118 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
         parts.Add("RESTART");
         return $"""ALTER TABLE "{x.SchemaName}"."{x.TableName}" ALTER COLUMN "{x.ColumnName}" {string.Join(" ", parts)}""";
     }
+
+    private static string BuildCreateEnum(CreateEnum x)
+    {
+        var values = string.Join(", ", x.Enum.Values.Select(v => $"'{EscapeLiteral(v)}'"));
+        return $"""CREATE TYPE "{x.SchemaName}"."{x.Enum.Name}" AS ENUM ({values})""";
+    }
+
+    private static string BuildAddEnumValue(AddEnumValue x)
+    {
+        var sql = $"""ALTER TYPE "{x.SchemaName}"."{x.EnumName}" ADD VALUE '{EscapeLiteral(x.Value)}'""";
+        return x switch
+        {
+            { Before: { } before } => $"{sql} BEFORE '{EscapeLiteral(before)}'",
+            { After: { } after } => $"{sql} AFTER '{EscapeLiteral(after)}'",
+            _ => sql,
+        };
+    }
+
+    private static string BuildCreateSequence(CreateSequence x)
+    {
+        var o = x.Sequence.Options;
+        var parts = new List<string>();
+        if (o.DataType is { } type)
+        {
+            parts.Add($"AS {ToPostgresType(type)}");
+        }
+
+        if (o.IncrementBy is { } increment)
+        {
+            parts.Add($"INCREMENT BY {increment}");
+        }
+
+        if (o.MinValue is { } min)
+        {
+            parts.Add($"MINVALUE {min}");
+        }
+
+        if (o.MaxValue is { } max)
+        {
+            parts.Add($"MAXVALUE {max}");
+        }
+
+        if (o.StartWith is { } start)
+        {
+            parts.Add($"START WITH {start}");
+        }
+
+        if (o.Cache is { } cache)
+        {
+            parts.Add($"CACHE {cache}");
+        }
+
+        if (o.Cycle)
+        {
+            parts.Add("CYCLE");
+        }
+
+        var clause = parts.Count > 0 ? $" {string.Join(" ", parts)}" : string.Empty;
+        return $"""CREATE SEQUENCE "{x.SchemaName}"."{x.Sequence.Name}"{clause}""";
+    }
+
+    // One clause per option that differs; a value going back to null resets to the engine default explicitly
+    // (AS bigint, INCREMENT BY 1, NO MINVALUE, NO MAXVALUE, CACHE 1, NO CYCLE), so apply → introspect normalizes
+    // back to null and shows no residual drift.
+    private static string BuildAlterSequence(AlterSequence x)
+    {
+        var (old, @new) = (x.OldOptions, x.NewOptions);
+        var parts = new List<string>();
+        if (old.DataType != @new.DataType)
+        {
+            parts.Add($"AS {ToPostgresType(@new.DataType ?? SqlType.BigInt)}");
+        }
+
+        if (old.IncrementBy != @new.IncrementBy)
+        {
+            parts.Add($"INCREMENT BY {@new.IncrementBy ?? 1}");
+        }
+
+        if (old.MinValue != @new.MinValue)
+        {
+            parts.Add(@new.MinValue is { } min ? $"MINVALUE {min}" : "NO MINVALUE");
+        }
+
+        if (old.MaxValue != @new.MaxValue)
+        {
+            parts.Add(@new.MaxValue is { } max ? $"MAXVALUE {max}" : "NO MAXVALUE");
+        }
+
+        if (old.StartWith != @new.StartWith)
+        {
+            // There is no NO START form; a reset emits the default a fresh sequence with the new options would
+            // have (effective minvalue ascending / maxvalue descending), so the next introspection reads null.
+            parts.Add($"START WITH {@new.StartWith ?? DefaultStart(@new)}");
+        }
+
+        if (old.Cache != @new.Cache)
+        {
+            parts.Add($"CACHE {@new.Cache ?? 1}");
+        }
+
+        if (old.Cycle != @new.Cycle)
+        {
+            parts.Add(@new.Cycle ? "CYCLE" : "NO CYCLE");
+        }
+
+        return $"""ALTER SEQUENCE "{x.SchemaName}"."{x.SequenceName}" {string.Join(" ", parts)}""";
+    }
+
+    private static long DefaultStart(SequenceOptions options) =>
+        (options.IncrementBy ?? 1) > 0 ? options.MinValue ?? 1 : options.MaxValue ?? -1;
+
+    private static string EscapeLiteral(string value) => value.Replace("'", "''");
 
     private static string ColList(IReadOnlyList<string> cols) =>
         string.Join(", ", cols.Select(c => $"\"{c}\""));

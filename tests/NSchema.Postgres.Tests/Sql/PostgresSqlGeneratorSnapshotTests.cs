@@ -104,6 +104,35 @@ public sealed class PostgresSqlGeneratorSnapshotTests
         new SetViewComment("public", "active_users", "Active users only", null),
         new DropView("public", "active_users"));
 
+    // ── Enums ──────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public Task EnumOperations() => VerifyPlan(
+        new CreateEnum("public", new EnumType("order_status", ["pending", "shipped", "won't_ship"])),
+        new RenameEnum("public", "order_state", "order_status"),
+        new AddEnumValue("public", "order_status", "delivered"),
+        new AddEnumValue("public", "order_status", "draft", Before: "pending"),
+        new AddEnumValue("public", "order_status", "in_transit", After: "shipped"),
+        new SetEnumComment("public", "order_status", null, "Order lifecycle"),
+        new SetEnumComment("public", "order_status", "Order lifecycle", null),
+        new DropEnum("public", "order_status"));
+
+    // ── Sequences ──────────────────────────────────────────────────────────────
+
+    [Fact]
+    public Task SequenceOperations() => VerifyPlan(
+        new CreateSequence("public", new Sequence("order_id")),
+        new CreateSequence("public", new Sequence("invoice_id", new SequenceOptions(
+            SqlType.SmallInt, StartWith: 100, IncrementBy: 5, MinValue: 10, MaxValue: 30000, Cache: 20, Cycle: true))),
+        new RenameSequence("public", "bill_id", "invoice_id"),
+        // A mixed delta: one option changes value, every other resets to its engine default explicitly.
+        new AlterSequence("public", "invoice_id",
+            OldOptions: new SequenceOptions(SqlType.SmallInt, StartWith: 100, IncrementBy: 5, MinValue: 10, MaxValue: 30000, Cache: 20, Cycle: true),
+            NewOptions: new SequenceOptions(IncrementBy: 50)),
+        new SetSequenceComment("public", "invoice_id", null, "Invoice numbers"),
+        new SetSequenceComment("public", "invoice_id", "Invoice numbers", null),
+        new DropSequence("public", "invoice_id"));
+
     // ── Comments ────────────────────────────────────────────────────────────────
 
     [Fact]

@@ -734,4 +734,153 @@ public sealed class PostgresSchemaProviderTests(PostgresContainerFixture fixture
         // Assert
         derived.DependsOn.ShouldHaveSingleItem().ShouldBe(new ViewDependency(_schema, "active_users"));
     }
+
+    // ── Enums ─────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task GetSchema_Enum_ReturnsValuesInCreationOrder()
+    {
+        // Arrange
+        await Exec($"""CREATE TYPE "{_schema}".order_status AS ENUM ('draft', 'active', 'archived')""");
+
+        // Act
+        var enumType = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Enums.ShouldHaveSingleItem();
+
+        // Assert — order is the type's comparison order, not alphabetical.
+        enumType.Name.ShouldBe("order_status");
+        enumType.Values.ShouldBe(["draft", "active", "archived"]);
+    }
+
+    [Fact]
+    public async Task GetSchema_EnumComment_IsCaptured()
+    {
+        // Arrange
+        await Exec($"""
+            CREATE TYPE "{_schema}".order_status AS ENUM ('draft');
+            COMMENT ON TYPE "{_schema}".order_status IS 'order lifecycle';
+            """);
+
+        // Act
+        var enumType = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Enums.ShouldHaveSingleItem();
+
+        // Assert
+        enumType.Comment.ShouldBe("order lifecycle");
+    }
+
+    [Fact]
+    public async Task GetSchema_EnumColumn_MappedAsCustomType()
+    {
+        // Arrange — a column typed as a user-defined enum comes back through MapSqlType's fall-through.
+        await Exec($"""
+            CREATE TYPE "{_schema}".order_status AS ENUM ('draft', 'active');
+            CREATE TABLE "{_schema}".orders (status "{_schema}".order_status NOT NULL);
+            """);
+
+        // Act
+        var column = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Tables.ShouldHaveSingleItem().Columns.ShouldHaveSingleItem();
+
+        // Assert
+        column.Type.ShouldBe(SqlType.Custom("order_status"));
+    }
+
+    // ── Sequences ─────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task GetSchema_BareSequence_AllOptionsNull()
+    {
+        // Arrange — the anti-phantom-drift gate: a bare sequence must introspect to all-null options so it
+        // compares equal to a bare "CREATE SEQUENCE" declaration in the desired schema.
+        await Exec($"""CREATE SEQUENCE "{_schema}".order_id""");
+
+        // Act
+        var sequence = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Sequences.ShouldHaveSingleItem();
+
+        // Assert
+        sequence.Name.ShouldBe("order_id");
+        sequence.Options.ShouldBe(new SequenceOptions());
+    }
+
+    [Fact]
+    public async Task GetSchema_DescendingSequence_OnlyIncrementKept()
+    {
+        // Arrange — a descending sequence's defaults (max -1, min = type min, start = max) must also fold to null.
+        await Exec($"""CREATE SEQUENCE "{_schema}".countdown INCREMENT -1""");
+
+        // Act
+        var sequence = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Sequences.ShouldHaveSingleItem();
+
+        // Assert
+        sequence.Options.ShouldBe(new SequenceOptions(IncrementBy: -1));
+    }
+
+    [Fact]
+    public async Task GetSchema_FullyOptionedSequence_OptionsCaptured()
+    {
+        // Arrange — start deliberately differs from minvalue so it is not folded away.
+        await Exec($"""CREATE SEQUENCE "{_schema}".order_id AS integer INCREMENT 5 MINVALUE 10 MAXVALUE 1000 START 20 CACHE 10 CYCLE""");
+
+        // Act
+        var sequence = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Sequences.ShouldHaveSingleItem();
+
+        // Assert
+        sequence.Options.ShouldBe(new SequenceOptions(
+            SqlType.Int, StartWith: 20, IncrementBy: 5, MinValue: 10, MaxValue: 1000, Cache: 10, Cycle: true));
+    }
+
+    [Fact]
+    public async Task GetSchema_IdentityOwnedSequence_IsExcluded()
+    {
+        // Arrange — an identity column's backing sequence is the column's implementation detail, not a
+        // standalone sequence. The identity options must still round-trip through the columns query.
+        await Exec($"""
+            CREATE TABLE "{_schema}".users (
+                id BIGINT GENERATED ALWAYS AS IDENTITY (START WITH 100) PRIMARY KEY
+            )
+            """);
+
+        // Act
+        var schema = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken)).Schemas[0];
+
+        // Assert
+        schema.Sequences.ShouldBeEmpty();
+        var id = schema.Tables.ShouldHaveSingleItem().Columns.ShouldHaveSingleItem();
+        id.IsIdentity.ShouldBeTrue();
+        id.IdentityOptions!.StartWith.ShouldBe(100);
+    }
+
+    [Fact]
+    public async Task GetSchema_SerialOwnedSequence_IsExcluded()
+    {
+        // Arrange — serial's sequence is owned by the column (pg_depend deptype 'a').
+        await Exec($"""CREATE TABLE "{_schema}".users (id SERIAL)""");
+
+        // Act
+        var schema = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken)).Schemas[0];
+
+        // Assert
+        schema.Sequences.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task GetSchema_SequenceComment_IsCaptured()
+    {
+        // Arrange
+        await Exec($"""
+            CREATE SEQUENCE "{_schema}".order_id;
+            COMMENT ON SEQUENCE "{_schema}".order_id IS 'order numbers';
+            """);
+
+        // Act
+        var sequence = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Sequences.ShouldHaveSingleItem();
+
+        // Assert
+        sequence.Comment.ShouldBe("order numbers");
+    }
 }
