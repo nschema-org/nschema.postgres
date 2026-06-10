@@ -41,6 +41,10 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
         DropPrimaryKey x => $"ALTER TABLE \"{x.SchemaName}\".\"{x.TableName}\" DROP CONSTRAINT \"{x.PrimaryKeyName}\"",
         AddForeignKey x => BuildAddForeignKey(x),
         DropForeignKey x => $"ALTER TABLE \"{x.SchemaName}\".\"{x.TableName}\" DROP CONSTRAINT \"{x.ForeignKeyName}\"",
+        AddUniqueConstraint x => $"""ALTER TABLE "{x.SchemaName}"."{x.TableName}" ADD CONSTRAINT "{x.UniqueConstraint.Name}" UNIQUE ({ColList(x.UniqueConstraint.ColumnNames)})""",
+        DropUniqueConstraint x => $"ALTER TABLE \"{x.SchemaName}\".\"{x.TableName}\" DROP CONSTRAINT \"{x.ConstraintName}\"",
+        AddCheckConstraint x => $"""ALTER TABLE "{x.SchemaName}"."{x.TableName}" ADD CONSTRAINT "{x.CheckConstraint.Name}" CHECK ({x.CheckConstraint.Expression})""",
+        DropCheckConstraint x => $"ALTER TABLE \"{x.SchemaName}\".\"{x.TableName}\" DROP CONSTRAINT \"{x.ConstraintName}\"",
         CreateIndex x => BuildCreateIndex(x),
         DropIndex x => $"DROP INDEX \"{x.SchemaName}\".\"{x.IndexName}\"",
         SetSchemaComment x => x.NewComment is null
@@ -55,6 +59,9 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
         SetIndexComment x => x.NewComment is null
             ? $"""COMMENT ON INDEX "{x.SchemaName}"."{x.IndexName}" IS NULL"""
             : $"""COMMENT ON INDEX "{x.SchemaName}"."{x.IndexName}" IS $comment${x.NewComment}$comment$""",
+        SetConstraintComment x => x.NewComment is null
+            ? $"""COMMENT ON CONSTRAINT "{x.ConstraintName}" ON "{x.SchemaName}"."{x.TableName}" IS NULL"""
+            : $"""COMMENT ON CONSTRAINT "{x.ConstraintName}" ON "{x.SchemaName}"."{x.TableName}" IS $comment${x.NewComment}$comment$""",
         GrantSchemaUsage x => $"""GRANT USAGE ON SCHEMA "{x.SchemaName}" TO {x.Role}""",
         RevokeSchemaUsage x => $"""REVOKE USAGE ON SCHEMA "{x.SchemaName}" FROM {x.Role}""",
         GrantTablePrivileges x => $"""GRANT {PrivilegeList(x.Privileges)} ON TABLE "{x.SchemaName}"."{x.TableName}" TO {x.Role}""",
@@ -66,6 +73,8 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
     {
         var parts = x.Table.Columns.Select(BuildColumnDef).ToList();
 
+        // Only the primary key is created inline; unique/check constraints, foreign keys and indexes arrive as
+        // separate ALTER TABLE actions from the linearizer (see DefaultPlanLinearizer.EmitTable).
         if (x.Table.PrimaryKey is { } pk)
         {
             parts.Add($"""CONSTRAINT "{pk.Name}" PRIMARY KEY ({ColList(pk.ColumnNames)})""");

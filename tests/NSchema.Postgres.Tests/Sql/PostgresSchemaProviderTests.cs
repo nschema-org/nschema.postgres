@@ -420,4 +420,178 @@ public sealed class PostgresSchemaProviderTests(PostgresContainerFixture fixture
         // Assert
         table.Indexes.ShouldBeEmpty();
     }
+
+    // ── Unique constraints ────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task GetSchema_UniqueConstraint_ReturnsConstraint()
+    {
+        // Arrange
+        await Exec($"""
+            CREATE TABLE "{_schema}".users (
+                id    INTEGER NOT NULL,
+                email TEXT    NOT NULL,
+                CONSTRAINT uq_users_email UNIQUE (email)
+            )
+            """);
+
+        // Act
+        var table = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken)).Schemas[0].Tables[0];
+
+        // Assert
+        var unique = table.UniqueConstraints.ShouldHaveSingleItem();
+        unique.Name.ShouldBe("uq_users_email");
+        unique.ColumnNames.ShouldBe(["email"]);
+    }
+
+    [Fact]
+    public async Task GetSchema_CompositeUniqueConstraint_ReturnsColumnsInOrder()
+    {
+        // Arrange
+        await Exec($"""
+            CREATE TABLE "{_schema}".memberships (
+                org_id  INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                CONSTRAINT uq_membership UNIQUE (org_id, user_id)
+            )
+            """);
+
+        // Act
+        var unique = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Tables[0].UniqueConstraints.Single();
+
+        // Assert
+        unique.ColumnNames.ShouldBe(["org_id", "user_id"]);
+    }
+
+    [Fact]
+    public async Task GetSchema_UniqueConstraint_IsNotReturnedAsTableIndex()
+    {
+        // Arrange — a unique constraint is backed by an index, but it should surface as a constraint, not an index.
+        await Exec($"""
+            CREATE TABLE "{_schema}".users (
+                id    INTEGER NOT NULL,
+                email TEXT    NOT NULL,
+                CONSTRAINT uq_users_email UNIQUE (email)
+            )
+            """);
+
+        // Act
+        var table = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken)).Schemas[0].Tables[0];
+
+        // Assert
+        table.UniqueConstraints.ShouldHaveSingleItem();
+        table.Indexes.ShouldBeEmpty();
+    }
+
+    // ── Check constraints ─────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task GetSchema_CheckConstraint_ReturnsConstraintWithExpression()
+    {
+        // Arrange
+        await Exec($"""
+            CREATE TABLE "{_schema}".accounts (
+                id      INTEGER NOT NULL,
+                balance INTEGER NOT NULL,
+                CONSTRAINT ck_balance CHECK (balance >= 0)
+            )
+            """);
+
+        // Act
+        var check = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Tables[0].CheckConstraints.ShouldHaveSingleItem();
+
+        // Assert — the "CHECK (...)" wrapper is stripped, leaving just the predicate.
+        check.Name.ShouldBe("ck_balance");
+        check.Expression.ShouldBe("balance >= 0");
+    }
+
+    // ── Constraint comments ───────────────────────────────────────────────────
+
+    [Fact]
+    public async Task GetSchema_PrimaryKeyComment_IsCaptured()
+    {
+        // Arrange
+        await Exec($"""
+            CREATE TABLE "{_schema}".users (
+                id INTEGER NOT NULL,
+                CONSTRAINT pk_users PRIMARY KEY (id)
+            );
+            COMMENT ON CONSTRAINT pk_users ON "{_schema}".users IS 'the surrogate key';
+            """);
+
+        // Act
+        var pk = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken)).Schemas[0].Tables[0].PrimaryKey;
+
+        // Assert
+        pk.ShouldNotBeNull();
+        pk!.Comment.ShouldBe("the surrogate key");
+    }
+
+    [Fact]
+    public async Task GetSchema_UniqueConstraintComment_IsCaptured()
+    {
+        // Arrange
+        await Exec($"""
+            CREATE TABLE "{_schema}".users (
+                id    INTEGER NOT NULL,
+                email TEXT    NOT NULL,
+                CONSTRAINT uq_users_email UNIQUE (email)
+            );
+            COMMENT ON CONSTRAINT uq_users_email ON "{_schema}".users IS 'one account per email';
+            """);
+
+        // Act
+        var unique = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Tables[0].UniqueConstraints.Single();
+
+        // Assert
+        unique.Comment.ShouldBe("one account per email");
+    }
+
+    [Fact]
+    public async Task GetSchema_CheckConstraintComment_IsCaptured()
+    {
+        // Arrange
+        await Exec($"""
+            CREATE TABLE "{_schema}".accounts (
+                id      INTEGER NOT NULL,
+                balance INTEGER NOT NULL,
+                CONSTRAINT ck_balance CHECK (balance >= 0)
+            );
+            COMMENT ON CONSTRAINT ck_balance ON "{_schema}".accounts IS 'no overdrafts';
+            """);
+
+        // Act
+        var check = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Tables[0].CheckConstraints.Single();
+
+        // Assert
+        check.Comment.ShouldBe("no overdrafts");
+    }
+
+    [Fact]
+    public async Task GetSchema_ForeignKeyComment_IsCaptured()
+    {
+        // Arrange
+        await Exec($"""
+            CREATE TABLE "{_schema}".organisations (
+                id INTEGER NOT NULL CONSTRAINT pk_orgs PRIMARY KEY
+            );
+            CREATE TABLE "{_schema}".users (
+                id     INTEGER NOT NULL CONSTRAINT pk_users PRIMARY KEY,
+                org_id INTEGER NOT NULL,
+                CONSTRAINT fk_users_org FOREIGN KEY (org_id) REFERENCES "{_schema}".organisations (id)
+            );
+            COMMENT ON CONSTRAINT fk_users_org ON "{_schema}".users IS 'owning organisation';
+            """);
+
+        // Act
+        var fk = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Tables.Single(t => t.Name == "users").ForeignKeys[0];
+
+        // Assert
+        fk.Comment.ShouldBe("owning organisation");
+    }
 }

@@ -1,4 +1,3 @@
-using Microsoft.Extensions.Options;
 using Npgsql;
 using NSchema.Plan.Model;
 using NSchema.Postgres.Sql;
@@ -6,6 +5,7 @@ using NSchema.Postgres.Tests.Fixtures;
 using NSchema.Schema.Model;
 using NSchema.Scripts.Model;
 using NSchema.Sql;
+using NSchema.Sql.Model;
 
 namespace NSchema.Postgres.Tests.Sql;
 
@@ -16,13 +16,13 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
     private readonly string _schema = $"test_{Guid.NewGuid():N}";
     private NpgsqlConnection _conn = null!;
     private PostgresSqlGenerator _generator = null!;
-    private DefaultSqlExecutor _executor = null!;
+    private StatementRunner _executor = null!;
 
     public async ValueTask InitializeAsync()
     {
         _conn = await _dataSource.OpenConnectionAsync();
         _generator = new PostgresSqlGenerator();
-        _executor = new DefaultSqlExecutor(Options.Create(new SqlOptions { TransactionMode = TransactionMode.Single }), _dataSource);
+        _executor = new StatementRunner(_dataSource);
         await Exec($"""CREATE SCHEMA "{_schema}" """);
     }
 
@@ -349,6 +349,105 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         exists.ShouldBeFalse();
     }
 
+    // ── Unique constraint operations ──────────────────────────────────────────
+
+    [Fact]
+    public async Task AddUniqueConstraint_AddsConstraintToTable()
+    {
+        // Arrange
+        await Exec($"""CREATE TABLE "{_schema}"."items" (id integer, code text)""");
+        var unique = new UniqueConstraint("uq_items_code", ["code"]);
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new AddUniqueConstraint(_schema, "items", unique)], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        var exists = await ScalarBool(
+            $"SELECT COUNT(*) > 0 FROM information_schema.table_constraints WHERE table_schema = '{_schema}' AND table_name = 'items' AND constraint_type = 'UNIQUE' AND constraint_name = 'uq_items_code'");
+        exists.ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task DropUniqueConstraint_RemovesConstraintFromTable()
+    {
+        // Arrange
+        await Exec($"""CREATE TABLE "{_schema}"."items" (id integer, code text, CONSTRAINT uq_items_code UNIQUE (code))""");
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new DropUniqueConstraint(_schema, "items", "uq_items_code")], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        var exists = await ScalarBool(
+            $"SELECT COUNT(*) > 0 FROM information_schema.table_constraints WHERE table_schema = '{_schema}' AND table_name = 'items' AND constraint_type = 'UNIQUE'");
+        exists.ShouldBeFalse();
+    }
+
+    // ── Check constraint operations ───────────────────────────────────────────
+
+    [Fact]
+    public async Task AddCheckConstraint_AddsConstraintToTable()
+    {
+        // Arrange
+        await Exec($"""CREATE TABLE "{_schema}"."accounts" (id integer, balance integer)""");
+        var check = new CheckConstraint("ck_balance", "balance >= 0");
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new AddCheckConstraint(_schema, "accounts", check)], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        var exists = await ScalarBool(
+            $"SELECT COUNT(*) > 0 FROM information_schema.table_constraints WHERE table_schema = '{_schema}' AND table_name = 'accounts' AND constraint_type = 'CHECK' AND constraint_name = 'ck_balance'");
+        exists.ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task DropCheckConstraint_RemovesConstraintFromTable()
+    {
+        // Arrange
+        await Exec($"""CREATE TABLE "{_schema}"."accounts" (id integer, balance integer, CONSTRAINT ck_balance CHECK (balance >= 0))""");
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new DropCheckConstraint(_schema, "accounts", "ck_balance")], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        var exists = await ScalarBool(
+            $"SELECT COUNT(*) > 0 FROM information_schema.table_constraints WHERE table_schema = '{_schema}' AND table_name = 'accounts' AND constraint_name = 'ck_balance'");
+        exists.ShouldBeFalse();
+    }
+
+    // ── Constraint comments ───────────────────────────────────────────────────
+
+    [Fact]
+    public async Task SetConstraintComment_SetsCommentOnConstraint()
+    {
+        // Arrange
+        await Exec($"""CREATE TABLE "{_schema}"."items" (id integer, code text, CONSTRAINT uq_items_code UNIQUE (code))""");
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new SetConstraintComment(_schema, "items", "uq_items_code", null, "one row per code")], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        var comment = await ScalarString(
+            $"SELECT obj_description(oid, 'pg_constraint') FROM pg_constraint WHERE conname = 'uq_items_code' AND connamespace = '{_schema}'::regnamespace");
+        comment.ShouldBe("one row per code");
+    }
+
+    [Fact]
+    public async Task SetConstraintComment_ClearsCommentWhenNull()
+    {
+        // Arrange
+        await Exec($"""CREATE TABLE "{_schema}"."items" (id integer, code text, CONSTRAINT uq_items_code UNIQUE (code))""");
+        await Exec($"""COMMENT ON CONSTRAINT uq_items_code ON "{_schema}"."items" IS 'old comment'""");
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new SetConstraintComment(_schema, "items", "uq_items_code", "old comment", null)], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        var hasComment = await ScalarBool(
+            $"SELECT obj_description(oid, 'pg_constraint') IS NOT NULL FROM pg_constraint WHERE conname = 'uq_items_code' AND connamespace = '{_schema}'::regnamespace");
+        hasComment.ShouldBeFalse();
+    }
+
     // ── Index operations ──────────────────────────────────────────────────────
 
     [Fact]
@@ -431,48 +530,24 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         exists.ShouldBeTrue();
     }
 
-    // ── Transactions ──────────────────────────────────────────────────────────
-
-    [Fact]
-    public async Task Execute_FailingStatement_RollsBackEarlierSchemaChanges()
-    {
-        // Arrange — a plan that creates a table successfully, then fails on a bad statement.
-        var goodTable = Table.Create("rollback_target",
-            columns: [Column.Create("id", SqlType.BigInt)]);
-        var action = new CreateTable(_schema, goodTable);
-        var postScript = new Script("boom", "SELECT * FROM does_not_exist_xyz", ScriptType.PostDeployment);
-
-        // Act
-        await Should.ThrowAsync<PostgresException>(() =>
-            _executor.Execute(_generator.Generate(new MigrationPlan([action], [], [postScript]))));
-
-        // Assert — the create from earlier in the plan should have been rolled back.
-        var exists = await ScalarBool(
-            $"SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_schema = '{_schema}' AND table_name = 'rollback_target'");
-        exists.ShouldBeFalse();
-    }
-
-    [Fact]
-    public async Task Execute_ScriptMarkedRunOutsideTransaction_CommitsIndependentlyOfLaterFailure()
-    {
-        // Arrange — a pre-deployment script with RunOutsideTransaction=true, followed by a failing action.
-        var preScript = new Script("seed_outside", $"""CREATE TABLE "{_schema}"."outside_tx" (id integer)""", ScriptType.PreDeployment)
-        {
-            RunOutsideTransaction = true,
-        };
-        var postScript = new Script("boom", "SELECT * FROM does_not_exist_xyz", ScriptType.PostDeployment);
-
-        // Act
-        await Should.ThrowAsync<PostgresException>(() =>
-            _executor.Execute(_generator.Generate(new MigrationPlan([], [preScript], [postScript]))));
-
-        // Assert — the out-of-tx script committed before the failure, so its table survives.
-        var exists = await ScalarBool(
-            $"SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_schema = '{_schema}' AND table_name = 'outside_tx'");
-        exists.ShouldBeTrue();
-    }
+    // Transaction/rollback semantics are the core executor's behaviour (DefaultSqlExecutor, now internal) and are
+    // tested in the core, not here — this suite covers the Postgres SQL the generator emits.
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    // Runs the generated statements directly (the core executor is internal). This is only a vehicle for asserting
+    // the generated SQL is valid Postgres; it intentionally does not replicate the executor's transaction handling.
+    private sealed class StatementRunner(NpgsqlDataSource dataSource)
+    {
+        public async Task Execute(SqlPlan plan, CancellationToken cancellationToken = default)
+        {
+            foreach (var statement in plan.Statements)
+            {
+                await using var command = dataSource.CreateCommand(statement.Sql);
+                await command.ExecuteNonQueryAsync(cancellationToken);
+            }
+        }
+    }
 
     private async Task Exec(string sql)
     {

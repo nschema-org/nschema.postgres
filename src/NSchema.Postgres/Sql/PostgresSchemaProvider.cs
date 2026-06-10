@@ -22,17 +22,20 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         var columns = await QueryColumns(conn, schemas, cancellationToken);
         var primaryKeys = await QueryPrimaryKeys(conn, schemas, cancellationToken);
         var foreignKeys = await QueryForeignKeys(conn, schemas, cancellationToken);
+        var uniqueConstraints = await QueryUniqueConstraints(conn, schemas, cancellationToken);
+        var checkConstraints = await QueryCheckConstraints(conn, schemas, cancellationToken);
         var indexes = await QueryIndexes(conn, schemas, cancellationToken);
         var schemaComments = await QuerySchemaComments(conn, schemas, cancellationToken);
         var tableComments = await QueryTableComments(conn, schemas, cancellationToken);
         var columnComments = await QueryColumnComments(conn, schemas, cancellationToken);
         var indexComments = await QueryIndexComments(conn, schemas, cancellationToken);
+        var constraintComments = await QueryConstraintComments(conn, schemas, cancellationToken);
         var schemaGrants = await QuerySchemaGrants(conn, schemas, cancellationToken);
         var tableGrants = await QueryTableGrants(conn, schemas, cancellationToken);
 
         return Build(
-            tables, columns, primaryKeys, foreignKeys, indexes,
-            schemaComments, tableComments, columnComments, indexComments,
+            tables, columns, primaryKeys, foreignKeys, uniqueConstraints, checkConstraints, indexes,
+            schemaComments, tableComments, columnComments, indexComments, constraintComments,
             schemaGrants, tableGrants
         );
     }
@@ -230,12 +233,163 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         return rows;
     }
 
+    private static async Task<List<UniqueConstraintRow>> QueryUniqueConstraints(NpgsqlConnection conn, string[]? schemas, CancellationToken ct)
+    {
+        var rows = new List<UniqueConstraintRow>();
+        await using var cmd = conn.CreateCommand();
+        // Unique constraints (contype = 'u') only — not unique indexes, which are introspected separately as
+        // indexes. Column ordering comes from conkey.
+        cmd.CommandText = """
+            SELECT
+                n.nspname AS table_schema,
+                t.relname AS table_name,
+                c.conname AS constraint_name,
+                array_agg(a.attname ORDER BY array_position(c.conkey, a.attnum)) AS column_names
+            FROM pg_constraint c
+            JOIN pg_class     t ON t.oid = c.conrelid
+            JOIN pg_namespace n ON n.oid = t.relnamespace
+            JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(c.conkey)
+            WHERE c.contype = 'u'
+            AND (@schemas::text[] IS NULL OR n.nspname = ANY(@schemas))
+            AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+            AND n.nspname NOT LIKE 'pg\_toast%' ESCAPE '\'
+            AND n.nspname NOT LIKE 'pg\_temp%' ESCAPE '\'
+            GROUP BY n.nspname, t.relname, c.conname
+            ORDER BY n.nspname, t.relname, c.conname
+            """;
+        AddSchemasParameter(cmd, schemas);
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows.Add(new UniqueConstraintRow(
+                TableSchema: reader.GetString(0),
+                TableName: reader.GetString(1),
+                ConstraintName: reader.GetString(2),
+                ColumnNames: reader.GetFieldValue<string[]>(3)
+            ));
+        }
+
+        return rows;
+    }
+
+    private static async Task<List<CheckConstraintRow>> QueryCheckConstraints(NpgsqlConnection conn, string[]? schemas, CancellationToken ct)
+    {
+        var rows = new List<CheckConstraintRow>();
+        await using var cmd = conn.CreateCommand();
+        // Check constraints (contype = 'c'). pg_get_constraintdef returns "CHECK (expr)" — strip the wrapper so the
+        // stored expression matches what the author wrote. Exclude NOT NULL (those surface as column nullability).
+        cmd.CommandText = """
+            SELECT
+                n.nspname AS table_schema,
+                t.relname AS table_name,
+                c.conname AS constraint_name,
+                pg_get_constraintdef(c.oid) AS definition
+            FROM pg_constraint c
+            JOIN pg_class     t ON t.oid = c.conrelid
+            JOIN pg_namespace n ON n.oid = t.relnamespace
+            WHERE c.contype = 'c'
+            AND (@schemas::text[] IS NULL OR n.nspname = ANY(@schemas))
+            AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+            AND n.nspname NOT LIKE 'pg\_toast%' ESCAPE '\'
+            AND n.nspname NOT LIKE 'pg\_temp%' ESCAPE '\'
+            ORDER BY n.nspname, t.relname, c.conname
+            """;
+        AddSchemasParameter(cmd, schemas);
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows.Add(new CheckConstraintRow(
+                TableSchema: reader.GetString(0),
+                TableName: reader.GetString(1),
+                ConstraintName: reader.GetString(2),
+                Expression: StripCheckWrapper(reader.GetString(3))
+            ));
+        }
+
+        return rows;
+    }
+
+    // pg_get_constraintdef renders a check as "CHECK (expr)". Postgres also re-parenthesises the predicate, so a
+    // declared "balance >= 0" comes back as "CHECK ((balance >= 0))". Strip the "CHECK (...)" wrapper and then one
+    // layer of fully-enclosing parentheses so the stored expression matches what the author wrote.
+    private static string StripCheckWrapper(string definition)
+    {
+        const string prefix = "CHECK (";
+        var start = definition.IndexOf(prefix, StringComparison.Ordinal);
+        if (start < 0)
+        {
+            return definition.Trim();
+        }
+
+        var inner = definition[(start + prefix.Length)..];
+        var end = inner.LastIndexOf(')');
+        var expression = (end >= 0 ? inner[..end] : inner).Trim();
+        return StripEnclosingParens(expression);
+    }
+
+    // Removes a single pair of parentheses that wraps the whole expression (Postgres adds these around check
+    // predicates). Leaves inner grouping parentheses intact, and is a no-op when the outermost "(" does not match
+    // the final ")" — e.g. "(a > 0) AND (b > 0)".
+    private static string StripEnclosingParens(string expression)
+    {
+        if (expression.Length < 2 || expression[0] != '(' || expression[^1] != ')')
+        {
+            return expression;
+        }
+
+        var depth = 0;
+        for (var i = 0; i < expression.Length; i++)
+        {
+            depth += expression[i] switch { '(' => 1, ')' => -1, _ => 0 };
+            // If we return to depth 0 before the final character, the leading "(" closes early, so it does not wrap
+            // the whole expression.
+            if (depth == 0 && i < expression.Length - 1)
+            {
+                return expression;
+            }
+        }
+
+        return expression[1..^1].Trim();
+    }
+
+    private static async Task<Dictionary<(string, string, string), string?>> QueryConstraintComments(NpgsqlConnection conn, string[]? schemas, CancellationToken ct)
+    {
+        var result = new Dictionary<(string, string, string), string?>();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT n.nspname, t.relname, c.conname, d.description
+            FROM pg_constraint c
+            JOIN pg_class     t ON t.oid = c.conrelid
+            JOIN pg_namespace n ON n.oid = t.relnamespace
+            LEFT JOIN pg_description d
+                ON d.objoid = c.oid
+                AND d.classoid = 'pg_constraint'::regclass
+                AND d.objsubid = 0
+            WHERE (@schemas::text[] IS NULL OR n.nspname = ANY(@schemas))
+            AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+            AND n.nspname NOT LIKE 'pg\_toast%' ESCAPE '\'
+            AND n.nspname NOT LIKE 'pg\_temp%' ESCAPE '\'
+            ORDER BY n.nspname, t.relname, c.conname
+            """;
+        AddSchemasParameter(cmd, schemas);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            result[(reader.GetString(0), reader.GetString(1), reader.GetString(2))] = reader.IsDBNull(3) ? null : reader.GetString(3);
+        }
+
+        return result;
+    }
+
     private static async Task<List<IndexRow>> QueryIndexes(NpgsqlConnection conn, string[]? schemas, CancellationToken ct)
     {
         var rows = new List<IndexRow>();
         await using var cmd = conn.CreateCommand();
-        // Exclude primary-key indexes. Exclude expression indexes (attnum = 0).
-        // Unique constraint indexes are included — they appear as TableIndex with IsUnique = true.
+        // Exclude primary-key indexes and any index that backs a constraint (a UNIQUE constraint's implicit index
+        // surfaces as a UniqueConstraint, not a TableIndex). Standalone CREATE UNIQUE INDEXes have no backing
+        // constraint, so they are still returned. Exclude expression indexes (attnum = 0).
         cmd.CommandText = """
             SELECT
                 n.nspname  AS schema_name,
@@ -255,6 +409,7 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
             AND n.nspname NOT LIKE 'pg\_toast%' ESCAPE '\'
             AND n.nspname NOT LIKE 'pg\_temp%' ESCAPE '\'
             AND NOT ix.indisprimary
+            AND NOT EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = i.oid)
             AND k.attnum > 0
             GROUP BY n.nspname, t.relname, i.relname, ix.indisunique, ix.indpred, ix.indrelid
             ORDER BY n.nspname, t.relname, i.relname
@@ -451,11 +606,14 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         List<ColumnRow> columns,
         List<PrimaryKeyRow> primaryKeys,
         List<ForeignKeyRow> foreignKeys,
+        List<UniqueConstraintRow> uniqueConstraints,
+        List<CheckConstraintRow> checkConstraints,
         List<IndexRow> indexes,
         Dictionary<string, string?> schemaComments,
         Dictionary<(string, string), string?> tableComments,
         Dictionary<(string, string, string), string?> columnComments,
         Dictionary<(string, string), string?> indexComments,
+        Dictionary<(string, string, string), string?> constraintComments,
         List<SchemaGrantRow> schemaGrants,
         List<TableGrantRow> tableGrants
     )
@@ -464,7 +622,7 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
             .GroupBy(t => t.Schema)
             .ToDictionary(
                 g => g.Key,
-                g => g.Select(t => BuildTable(t, columns, primaryKeys, foreignKeys, indexes, tableComments, columnComments, indexComments, tableGrants)).ToList());
+                g => g.Select(t => BuildTable(t, columns, primaryKeys, foreignKeys, uniqueConstraints, checkConstraints, indexes, tableComments, columnComments, indexComments, constraintComments, tableGrants)).ToList());
 
         // Drive schema list from what actually exists in the database, not from what was requested.
         var existingSchemas = schemaComments.Keys
@@ -491,10 +649,13 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         List<ColumnRow> allColumns,
         List<PrimaryKeyRow> allPrimaryKeys,
         List<ForeignKeyRow> allForeignKeys,
+        List<UniqueConstraintRow> allUniqueConstraints,
+        List<CheckConstraintRow> allCheckConstraints,
         List<IndexRow> allIndexes,
         Dictionary<(string, string), string?> tableComments,
         Dictionary<(string, string, string), string?> columnComments,
         Dictionary<(string, string), string?> indexComments,
+        Dictionary<(string, string, string), string?> constraintComments,
         List<TableGrantRow> allTableGrants
     )
     {
@@ -506,12 +667,25 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         var pk = allPrimaryKeys
             .Where(pk => pk.TableSchema == tableRow.Schema && pk.TableName == tableRow.Name)
             .GroupBy(pk => pk.ConstraintName)
-            .Select(g => new PrimaryKey(g.Key, g.Select(r => r.ColumnName).ToList()))
+            .Select(g => new PrimaryKey(g.Key, g.Select(r => r.ColumnName).ToList(),
+                constraintComments.GetValueOrDefault((tableRow.Schema, tableRow.Name, g.Key))))
             .FirstOrDefault();
 
         var fks = allForeignKeys
             .Where(fk => fk.TableSchema == tableRow.Schema && fk.TableName == tableRow.Name)
-            .Select(MapForeignKey)
+            .Select(fk => MapForeignKey(fk, constraintComments.GetValueOrDefault((tableRow.Schema, tableRow.Name, fk.ConstraintName))))
+            .ToList();
+
+        var uniques = allUniqueConstraints
+            .Where(u => u.TableSchema == tableRow.Schema && u.TableName == tableRow.Name)
+            .Select(u => new UniqueConstraint(u.ConstraintName, u.ColumnNames,
+                constraintComments.GetValueOrDefault((tableRow.Schema, tableRow.Name, u.ConstraintName))))
+            .ToList();
+
+        var checks = allCheckConstraints
+            .Where(c => c.TableSchema == tableRow.Schema && c.TableName == tableRow.Name)
+            .Select(c => new CheckConstraint(c.ConstraintName, c.Expression,
+                constraintComments.GetValueOrDefault((tableRow.Schema, tableRow.Name, c.ConstraintName))))
             .ToList();
 
         var idxs = allIndexes
@@ -530,7 +704,18 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
             .Select(g => new TableGrant(g.Key, ToTablePrivilege(g.Select(r => r.Privilege))))
             .ToList();
 
-        return new Table(tableRow.Name, null, pk, tableComment, cols, fks, idxs, grants);
+        // Named args keep this resilient to new Table members.
+        return Table.Create(
+            tableRow.Name,
+            primaryKey: pk,
+            comment: tableComment,
+            columns: cols,
+            foreignKeys: fks,
+            uniqueConstraints: uniques,
+            checkConstraints: checks,
+            indexes: idxs,
+            grants: grants
+        );
     }
 
     // ── Mapping ───────────────────────────────────────────────────────────────
@@ -589,14 +774,15 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         });
     }
 
-    private static ForeignKey MapForeignKey(ForeignKeyRow row) => new(
+    private static ForeignKey MapForeignKey(ForeignKeyRow row, string? comment = null) => new(
         row.ConstraintName,
         row.ColumnNames,
         row.ForeignSchema,
         row.ForeignTable,
         row.ForeignColumnNames,
         MapReferentialAction(row.DeleteRule),
-        MapReferentialAction(row.UpdateRule)
+        MapReferentialAction(row.UpdateRule),
+        comment
     );
 
     private static ReferentialAction MapReferentialAction(char code) => code switch
