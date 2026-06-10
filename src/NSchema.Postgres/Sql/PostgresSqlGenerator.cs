@@ -13,20 +13,22 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
     {
         var preDeploymentStatements = plan.PreDeploymentScripts.Select(s => new SqlStatement(s.Sql, s.RunOutsideTransaction));
         var postDeploymentStatements = plan.PostDeploymentScripts.Select(s => new SqlStatement(s.Sql, s.RunOutsideTransaction));
-        var statements = plan.Actions.Select(GenerateStatement).ToList();
+        var statements = plan.Actions.SelectMany(GenerateStatements).ToList();
         List<SqlStatement> allStatements = [.. preDeploymentStatements, .. statements, .. postDeploymentStatements];
         return new SqlPlan(allStatements);
     }
 
     // ── SQL generation ────────────────────────────────────────────────────────
 
-    private static SqlStatement GenerateStatement(MigrationAction action) => action switch
+    private static IEnumerable<SqlStatement> GenerateStatements(MigrationAction action) => action switch
     {
         // A value added by ALTER TYPE … ADD VALUE cannot be used until the transaction that added it commits, so
         // the statement is carved out of the surrounding transaction. The executor commits the pending segment,
         // runs it alone, and resumes — ordering relative to later statements that use the value is preserved.
-        AddEnumValue x => new SqlStatement(BuildAddEnumValue(x), RunOutsideTransaction: true),
-        _ => new SqlStatement(GenerateSql(action)),
+        AddEnumValue x => [new SqlStatement(BuildAddEnumValue(x), RunOutsideTransaction: true)],
+        RecreateFunction x => BuildRecreateRoutine("FUNCTION", x.SchemaName, x.Function.Name, x.Function.Arguments, x.Function.Definition, x.Function.Comment),
+        RecreateProcedure x => BuildRecreateRoutine("PROCEDURE", x.SchemaName, x.Procedure.Name, x.Procedure.Arguments, x.Procedure.Definition, x.Procedure.Comment),
+        _ => [new SqlStatement(GenerateSql(action))],
     };
 
     private static string GenerateSql(MigrationAction action) => action switch
@@ -78,6 +80,21 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
         SetSequenceComment x => x.NewComment is null
             ? $"""COMMENT ON SEQUENCE "{x.SchemaName}"."{x.SequenceName}" IS NULL"""
             : $"""COMMENT ON SEQUENCE "{x.SchemaName}"."{x.SequenceName}" IS $comment${x.NewComment}$comment$""",
+        // A routine Add and a definition-only Modify both arrive as Create; CREATE OR REPLACE serves both. The model
+        // has no overloading (one routine per name), so drops, renames and comments omit the signature — Postgres
+        // resolves the bare name, and rejects it loudly if an out-of-model overload makes it ambiguous.
+        CreateFunction x => $"""CREATE OR REPLACE FUNCTION "{x.SchemaName}"."{x.Function.Name}"({x.Function.Arguments}) {x.Function.Definition}""",
+        DropFunction x => $"DROP FUNCTION \"{x.SchemaName}\".\"{x.FunctionName}\"",
+        RenameFunction x => $"ALTER FUNCTION \"{x.SchemaName}\".\"{x.OldName}\" RENAME TO \"{x.NewName}\"",
+        SetFunctionComment x => x.NewComment is null
+            ? $"""COMMENT ON FUNCTION "{x.SchemaName}"."{x.FunctionName}" IS NULL"""
+            : $"""COMMENT ON FUNCTION "{x.SchemaName}"."{x.FunctionName}" IS $comment${x.NewComment}$comment$""",
+        CreateProcedure x => $"""CREATE OR REPLACE PROCEDURE "{x.SchemaName}"."{x.Procedure.Name}"({x.Procedure.Arguments}) {x.Procedure.Definition}""",
+        DropProcedure x => $"DROP PROCEDURE \"{x.SchemaName}\".\"{x.ProcedureName}\"",
+        RenameProcedure x => $"ALTER PROCEDURE \"{x.SchemaName}\".\"{x.OldName}\" RENAME TO \"{x.NewName}\"",
+        SetProcedureComment x => x.NewComment is null
+            ? $"""COMMENT ON PROCEDURE "{x.SchemaName}"."{x.ProcedureName}" IS NULL"""
+            : $"""COMMENT ON PROCEDURE "{x.SchemaName}"."{x.ProcedureName}" IS $comment${x.NewComment}$comment$""",
         SetSchemaComment x => x.NewComment is null
             ? $"""COMMENT ON SCHEMA "{x.SchemaName}" IS NULL"""
             : $"""COMMENT ON SCHEMA "{x.SchemaName}" IS $comment${x.NewComment}$comment$""",
@@ -297,6 +314,20 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
         }
 
         return $"""ALTER SEQUENCE "{x.SchemaName}"."{x.SequenceName}" {string.Join(" ", parts)}""";
+    }
+
+    // A signature change cannot replace in place — CREATE OR REPLACE under a different argument list would create a
+    // separate overload rather than replacing the routine. The drop also discards the catalog comment, so it is
+    // re-issued from the desired model when one is set. The statements stay separate; the executor runs them inside
+    // the same migration transaction.
+    private static IEnumerable<SqlStatement> BuildRecreateRoutine(string kind, string schemaName, string name, string arguments, string definition, string? comment)
+    {
+        yield return new SqlStatement($"DROP {kind} \"{schemaName}\".\"{name}\"");
+        yield return new SqlStatement($"""CREATE {kind} "{schemaName}"."{name}"({arguments}) {definition}""");
+        if (comment is not null)
+        {
+            yield return new SqlStatement($"""COMMENT ON {kind} "{schemaName}"."{name}" IS $comment${comment}$comment$""");
+        }
     }
 
     private static long DefaultStart(SequenceOptions options) =>

@@ -133,6 +133,35 @@ public sealed class PostgresSqlGeneratorSnapshotTests
         new SetSequenceComment("public", "invoice_id", "Invoice numbers", null),
         new DropSequence("public", "invoice_id"));
 
+    // ── Functions ─────────────────────────────────────────────────────────────
+
+    [Fact]
+    public Task FunctionOperations() => VerifyPlan(
+        new CreateFunction("public", new Function("active_user_count", "",
+            "RETURNS integer LANGUAGE sql AS $$ SELECT count(*) FROM public.users WHERE active $$")),
+        new RenameFunction("public", "user_count", "active_user_count"),
+        // A signature change: drop + recreate, re-issuing the comment the drop discarded.
+        new RecreateFunction("public", new Function("add_numbers", "a integer, b integer, c integer DEFAULT 0",
+            "RETURNS integer LANGUAGE sql AS $$ SELECT a + b + c $$", Comment: "Adds numbers")),
+        new RecreateFunction("public", new Function("subtract_numbers", "a integer, b integer",
+            "RETURNS integer LANGUAGE sql AS $$ SELECT a - b $$")),
+        new SetFunctionComment("public", "active_user_count", null, "Count of active users"),
+        new SetFunctionComment("public", "active_user_count", "Count of active users", null),
+        new DropFunction("public", "active_user_count"));
+
+    // ── Procedures ────────────────────────────────────────────────────────────
+
+    [Fact]
+    public Task ProcedureOperations() => VerifyPlan(
+        new CreateProcedure("public", new Procedure("archive_users", "cutoff date",
+            "LANGUAGE sql AS $$ DELETE FROM public.users WHERE created_at < cutoff $$")),
+        new RenameProcedure("public", "purge_users", "archive_users"),
+        new RecreateProcedure("public", new Procedure("archive_users", "cutoff timestamptz",
+            "LANGUAGE sql AS $$ DELETE FROM public.users WHERE created_at < cutoff $$", Comment: "Archives stale users")),
+        new SetProcedureComment("public", "archive_users", null, "Archive job"),
+        new SetProcedureComment("public", "archive_users", "Archive job", null),
+        new DropProcedure("public", "archive_users"));
+
     // ── Comments ────────────────────────────────────────────────────────────────
 
     [Fact]

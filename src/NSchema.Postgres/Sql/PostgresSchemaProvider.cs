@@ -39,12 +39,17 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         var enumComments = await QueryEnumComments(conn, schemas, cancellationToken);
         var sequences = await QuerySequences(conn, schemas, cancellationToken);
         var sequenceComments = await QuerySequenceComments(conn, schemas, cancellationToken);
+        var functions = await QueryRoutines(conn, schemas, FunctionKind, cancellationToken);
+        var functionComments = await QueryRoutineComments(conn, schemas, FunctionKind, cancellationToken);
+        var procedures = await QueryRoutines(conn, schemas, ProcedureKind, cancellationToken);
+        var procedureComments = await QueryRoutineComments(conn, schemas, ProcedureKind, cancellationToken);
 
         return Build(
             tables, columns, primaryKeys, foreignKeys, uniqueConstraints, checkConstraints, indexes,
             schemaComments, tableComments, columnComments, indexComments, constraintComments,
             schemaGrants, tableGrants, views, viewComments, viewDependencies,
-            enums, enumComments, sequences, sequenceComments
+            enums, enumComments, sequences, sequenceComments,
+            functions, functionComments, procedures, procedureComments
         );
     }
 
@@ -865,6 +870,143 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         return result;
     }
 
+    // pg_proc.prokind discriminators — 'a' (aggregate) and 'w' (window) are not part of the model.
+    private const char FunctionKind = 'f';
+    private const char ProcedureKind = 'p';
+
+    private static async Task<List<RoutineRow>> QueryRoutines(NpgsqlConnection conn, string[]? schemas, char kind, CancellationToken ct)
+    {
+        var rows = new List<RoutineRow>();
+        await using var cmd = conn.CreateCommand();
+        // pg_get_functiondef is the DB's canonical form (same anti-phantom-drift approach as views): its header is
+        // built as CREATE OR REPLACE <kind> <quoted schema>.<quoted name>(<pg_get_function_arguments>), so stripping
+        // a prefix of exactly that shape leaves the model's verbatim Definition — splitting on a parenthesis would
+        // break on argument defaults that themselves contain parentheses. Extension-owned routines are an extension's
+        // implementation detail (e.g. everything citext installs), excluded via pg_depend deptype 'e'.
+        cmd.CommandText = """
+            SELECT n.nspname AS schema_name,
+                   p.proname AS routine_name,
+                   pg_get_function_arguments(p.oid) AS arguments,
+                   substr(pg_get_functiondef(p.oid),
+                          length(format('CREATE OR REPLACE %s %s.%s(%s)',
+                                        CASE WHEN p.prokind = 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END,
+                                        quote_ident(n.nspname), quote_ident(p.proname),
+                                        pg_get_function_arguments(p.oid))) + 1) AS definition
+            FROM pg_proc p
+            JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE p.prokind = @kind::"char"
+            AND (@schemas::text[] IS NULL OR n.nspname = ANY(@schemas))
+            AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+            AND n.nspname NOT LIKE 'pg\_toast%' ESCAPE '\'
+            AND n.nspname NOT LIKE 'pg\_temp%' ESCAPE '\'
+            AND NOT EXISTS (
+                SELECT 1
+                FROM pg_depend dep
+                WHERE dep.classid = 'pg_proc'::regclass
+                AND dep.objid = p.oid
+                AND dep.deptype = 'e'
+            )
+            ORDER BY n.nspname, p.proname
+            """;
+        AddSchemasParameter(cmd, schemas);
+        cmd.Parameters.AddWithValue("kind", kind.ToString());
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            var arguments = reader.GetString(2);
+            rows.Add(new RoutineRow(
+                reader.GetString(0), reader.GetString(1),
+                kind == ProcedureKind ? NormalizeProcedureArguments(arguments) : arguments,
+                reader.GetString(3).Trim()));
+        }
+
+        return rows;
+    }
+
+    // Postgres spells out the default IN mode when rendering a *procedure's* argument list ("IN a integer") —
+    // for functions it only prints non-default modes. Fold the explicit default away so the idiomatic declaration
+    // ("a integer") compares clean; OUT / INOUT / VARIADIC are real signature information and survive. Same
+    // documented trade-off as NormalizeSequenceOptions: a desired schema that explicitly writes "IN" shows drift —
+    // omit it instead.
+    internal static string NormalizeProcedureArguments(string arguments)
+    {
+        return string.Join(", ", SplitTopLevel(arguments).Select(argument =>
+            argument.StartsWith("IN ", StringComparison.Ordinal) ? argument[3..] : argument));
+    }
+
+    // Splits the rendered argument list on top-level commas only — a comma inside a parenthesised or quoted
+    // default expression (e.g. DEFAULT repeat('x', 3)) is part of its argument.
+    private static List<string> SplitTopLevel(string arguments)
+    {
+        var parts = new List<string>();
+        var depth = 0;
+        var quote = '\0';
+        var start = 0;
+        for (var i = 0; i < arguments.Length; i++)
+        {
+            var c = arguments[i];
+            if (quote != '\0')
+            {
+                if (c == quote)
+                {
+                    quote = '\0'; // a doubled quote re-enters on the next character, which splits identically
+                }
+                continue;
+            }
+
+            switch (c)
+            {
+                case '\'' or '"':
+                    quote = c;
+                    break;
+                case '(':
+                    depth++;
+                    break;
+                case ')':
+                    depth--;
+                    break;
+                case ',' when depth == 0:
+                    parts.Add(arguments[start..i].Trim());
+                    start = i + 1;
+                    break;
+            }
+        }
+
+        parts.Add(arguments[start..].Trim());
+        return parts;
+    }
+
+    private static async Task<Dictionary<(string, string), string?>> QueryRoutineComments(NpgsqlConnection conn, string[]? schemas, char kind, CancellationToken ct)
+    {
+        var result = new Dictionary<(string, string), string?>();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT n.nspname, p.proname, d.description
+            FROM pg_proc p
+            JOIN pg_namespace n ON n.oid = p.pronamespace
+            LEFT JOIN pg_description d
+                ON d.objoid = p.oid
+                AND d.classoid = 'pg_proc'::regclass
+                AND d.objsubid = 0
+            WHERE p.prokind = @kind::"char"
+            AND (@schemas::text[] IS NULL OR n.nspname = ANY(@schemas))
+            AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+            AND n.nspname NOT LIKE 'pg\_toast%' ESCAPE '\'
+            AND n.nspname NOT LIKE 'pg\_temp%' ESCAPE '\'
+            ORDER BY n.nspname, p.proname
+            """;
+        AddSchemasParameter(cmd, schemas);
+        cmd.Parameters.AddWithValue("kind", kind.ToString());
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            result[(reader.GetString(0), reader.GetString(1))] = reader.IsDBNull(2) ? null : reader.GetString(2);
+        }
+
+        return result;
+    }
+
     // ── Model assembly ────────────────────────────────────────────────────────
 
     private static DatabaseSchema Build(
@@ -888,7 +1030,11 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         List<EnumRow> enums,
         Dictionary<(string, string), string?> enumComments,
         List<SequenceRow> sequences,
-        Dictionary<(string, string), string?> sequenceComments
+        Dictionary<(string, string), string?> sequenceComments,
+        List<RoutineRow> functions,
+        Dictionary<(string, string), string?> functionComments,
+        List<RoutineRow> procedures,
+        Dictionary<(string, string), string?> procedureComments
     )
     {
         var bySchema = tables
@@ -917,12 +1063,28 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
                 g => g.Select(s => new Sequence(s.Name, NormalizeSequenceOptions(s), OldName: null,
                     Comment: sequenceComments.GetValueOrDefault((s.Schema, s.Name)))).ToList());
 
+        var functionsBySchema = functions
+            .GroupBy(f => f.Schema)
+            .ToDictionary(
+                g => g.Key,
+                g => g.Select(f => new Function(f.Name, f.Arguments, f.Definition, OldName: null,
+                    Comment: functionComments.GetValueOrDefault((f.Schema, f.Name)))).ToList());
+
+        var proceduresBySchema = procedures
+            .GroupBy(p => p.Schema)
+            .ToDictionary(
+                g => g.Key,
+                g => g.Select(p => new Procedure(p.Name, p.Arguments, p.Definition, OldName: null,
+                    Comment: procedureComments.GetValueOrDefault((p.Schema, p.Name)))).ToList());
+
         // Drive schema list from what actually exists in the database, not from what was requested.
         var existingSchemas = schemaComments.Keys
             .Union(bySchema.Keys)
             .Union(viewsBySchema.Keys)
             .Union(enumsBySchema.Keys)
             .Union(sequencesBySchema.Keys)
+            .Union(functionsBySchema.Keys)
+            .Union(proceduresBySchema.Keys)
             .Union(schemaGrants.Select(g => g.SchemaName))
             .Distinct(StringComparer.OrdinalIgnoreCase);
 
@@ -939,7 +1101,11 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
                     Enums: enumsBySchema.GetValueOrDefault(name, []),
                     DroppedEnums: [],
                     Sequences: sequencesBySchema.GetValueOrDefault(name, []),
-                    DroppedSequences: []);
+                    DroppedSequences: [],
+                    Functions: functionsBySchema.GetValueOrDefault(name, []),
+                    DroppedFunctions: [],
+                    Procedures: proceduresBySchema.GetValueOrDefault(name, []),
+                    DroppedProcedures: []);
             })
             .ToList();
 

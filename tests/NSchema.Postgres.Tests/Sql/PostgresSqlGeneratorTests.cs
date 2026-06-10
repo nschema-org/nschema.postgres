@@ -843,6 +843,208 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         exists.ShouldBeFalse();
     }
 
+    // ── Functions ─────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task CreateFunction_CreatesFunctionInDatabase()
+    {
+        // Arrange
+        var function = new Function("add_numbers", "a integer, b integer",
+            "RETURNS integer LANGUAGE sql AS $$ SELECT a + b $$");
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new CreateFunction(_schema, function)], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        (await ScalarString($"""SELECT "{_schema}".add_numbers(2, 3)::text""")).ShouldBe("5");
+    }
+
+    [Fact]
+    public async Task CreateFunction_OnExistingFunction_ReplacesDefinition()
+    {
+        // Arrange — CreateFunction serves both add and definition-only modify; the second create must replace.
+        await Exec($"""CREATE FUNCTION "{_schema}".answer() RETURNS integer LANGUAGE sql AS $$ SELECT 1 $$""");
+        var replacement = new Function("answer", "", "RETURNS integer LANGUAGE sql AS $$ SELECT 42 $$");
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new CreateFunction(_schema, replacement)], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        (await ScalarString($"""SELECT "{_schema}".answer()::text""")).ShouldBe("42");
+    }
+
+    [Fact]
+    public async Task RecreateFunction_ChangedSignature_ReplacesWithoutLeavingAnOverload()
+    {
+        // Arrange — a changed argument list must drop + recreate; CREATE OR REPLACE would add an overload instead.
+        // The drop discards the catalog comment, so the recreate must re-issue it from the desired model.
+        await Exec($"""
+            CREATE FUNCTION "{_schema}".add_numbers(a integer, b integer) RETURNS integer LANGUAGE sql AS $$ SELECT a + b $$;
+            COMMENT ON FUNCTION "{_schema}".add_numbers IS 'Adds numbers';
+            """);
+        var desired = new Function("add_numbers", "a integer, b integer, c integer",
+            "RETURNS integer LANGUAGE sql AS $$ SELECT a + b + c $$", Comment: "Adds numbers");
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new RecreateFunction(_schema, desired)], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert — exactly one routine remains, under the new signature, with the comment restored.
+        var count = await ScalarString($"""
+            SELECT count(*)::text FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE n.nspname = '{_schema}' AND p.proname = 'add_numbers'
+            """);
+        count.ShouldBe("1");
+        (await ScalarString($"""SELECT "{_schema}".add_numbers(1, 2, 3)::text""")).ShouldBe("6");
+        (await ScalarString(RoutineCommentSql("add_numbers"))).ShouldBe("Adds numbers");
+    }
+
+    [Fact]
+    public async Task RenameFunction_RenamesFunction()
+    {
+        // Arrange
+        await Exec($"""CREATE FUNCTION "{_schema}".old_answer() RETURNS integer LANGUAGE sql AS $$ SELECT 42 $$""");
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new RenameFunction(_schema, "old_answer", "answer")], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        (await ScalarString($"""SELECT "{_schema}".answer()::text""")).ShouldBe("42");
+    }
+
+    [Fact]
+    public async Task SetFunctionComment_SetsAndClearsComment()
+    {
+        // Arrange
+        await Exec($"""CREATE FUNCTION "{_schema}".answer() RETURNS integer LANGUAGE sql AS $$ SELECT 42 $$""");
+        var commentSql = RoutineCommentSql("answer");
+
+        // Act + Assert — set...
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new SetFunctionComment(_schema, "answer", null, "the answer")], [], [])), TestContext.Current.CancellationToken);
+        (await ScalarString(commentSql)).ShouldBe("the answer");
+
+        // ...and clear.
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new SetFunctionComment(_schema, "answer", "the answer", null)], [], [])), TestContext.Current.CancellationToken);
+        (await ScalarBool($"SELECT ({commentSql}) IS NULL")).ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task DropFunction_RemovesFunction()
+    {
+        // Arrange
+        await Exec($"""CREATE FUNCTION "{_schema}".answer() RETURNS integer LANGUAGE sql AS $$ SELECT 42 $$""");
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new DropFunction(_schema, "answer")], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        var exists = await ScalarBool($"""
+            SELECT COUNT(*) > 0 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE n.nspname = '{_schema}' AND p.proname = 'answer'
+            """);
+        exists.ShouldBeFalse();
+    }
+
+    // ── Procedures ────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task CreateProcedure_CreatesProcedureInDatabase()
+    {
+        // Arrange
+        await Exec($"""CREATE TABLE "{_schema}".audit (entry text)""");
+        var procedure = new Procedure("log_entry", "message text",
+            $"""LANGUAGE sql AS $$ INSERT INTO "{_schema}".audit (entry) VALUES (message) $$""");
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new CreateProcedure(_schema, procedure)], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert — the procedure exists and is callable.
+        await Exec($"""CALL "{_schema}".log_entry('hello')""");
+        (await ScalarString($"""SELECT entry FROM "{_schema}".audit""")).ShouldBe("hello");
+    }
+
+    [Fact]
+    public async Task RecreateProcedure_ChangedSignature_ReplacesWithoutLeavingAnOverload()
+    {
+        // Arrange
+        await Exec($"""
+            CREATE PROCEDURE "{_schema}".noop(a integer) LANGUAGE sql AS $$ SELECT 1 $$;
+            COMMENT ON PROCEDURE "{_schema}".noop IS 'does nothing';
+            """);
+        var desired = new Procedure("noop", "a integer, b integer",
+            "LANGUAGE sql AS $$ SELECT 1 $$", Comment: "does nothing");
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new RecreateProcedure(_schema, desired)], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        var count = await ScalarString($"""
+            SELECT count(*)::text FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE n.nspname = '{_schema}' AND p.proname = 'noop'
+            """);
+        count.ShouldBe("1");
+        await Exec($"""CALL "{_schema}".noop(1, 2)""");
+        (await ScalarString(RoutineCommentSql("noop"))).ShouldBe("does nothing");
+    }
+
+    [Fact]
+    public async Task RenameProcedure_RenamesProcedure()
+    {
+        // Arrange
+        await Exec($"""CREATE PROCEDURE "{_schema}".old_noop() LANGUAGE sql AS $$ SELECT 1 $$""");
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new RenameProcedure(_schema, "old_noop", "noop")], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        await Exec($"""CALL "{_schema}".noop()""");
+    }
+
+    [Fact]
+    public async Task SetProcedureComment_SetsAndClearsComment()
+    {
+        // Arrange
+        await Exec($"""CREATE PROCEDURE "{_schema}".noop() LANGUAGE sql AS $$ SELECT 1 $$""");
+        var commentSql = RoutineCommentSql("noop");
+
+        // Act + Assert — set...
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new SetProcedureComment(_schema, "noop", null, "does nothing")], [], [])), TestContext.Current.CancellationToken);
+        (await ScalarString(commentSql)).ShouldBe("does nothing");
+
+        // ...and clear.
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new SetProcedureComment(_schema, "noop", "does nothing", null)], [], [])), TestContext.Current.CancellationToken);
+        (await ScalarBool($"SELECT ({commentSql}) IS NULL")).ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task DropProcedure_RemovesProcedure()
+    {
+        // Arrange
+        await Exec($"""CREATE PROCEDURE "{_schema}".noop() LANGUAGE sql AS $$ SELECT 1 $$""");
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new DropProcedure(_schema, "noop")], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        var exists = await ScalarBool($"""
+            SELECT COUNT(*) > 0 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE n.nspname = '{_schema}' AND p.proname = 'noop'
+            """);
+        exists.ShouldBeFalse();
+    }
+
     // ── Round-trips (generate → execute → introspect) ─────────────────────────
 
     [Fact]
@@ -897,6 +1099,28 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         enumType.Values.ShouldBe(["a", "b", "c", "d"]);
     }
 
+    [Fact]
+    public async Task RoundTrip_Function_IntrospectsWithSameArguments()
+    {
+        // Arrange — the argument list is the recreate trigger, so what was applied must read back verbatim.
+        // (The definition reads back in the DB's canonical form — $function$ quoting, qualified names — which the
+        // core reconciles by storing the DB-reported form, as with view bodies.)
+        var function = new Function("add_numbers", "a integer, b integer",
+            "RETURNS integer LANGUAGE sql AS $$ SELECT a + b $$");
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new CreateFunction(_schema, function)], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        var provider = new PostgresSchemaProvider(_dataSource);
+        var introspected = (await provider.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Functions.ShouldHaveSingleItem();
+        introspected.Name.ShouldBe("add_numbers");
+        introspected.Arguments.ShouldBe("a integer, b integer");
+        introspected.Definition.ShouldContain("SELECT a + b");
+    }
+
     // Transaction/rollback semantics are the core executor's behaviour (DefaultSqlExecutor, now internal) and are
     // tested in the core, not here — this suite covers the Postgres SQL the generator emits.
 
@@ -936,6 +1160,13 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         cmd.CommandText = sql;
         return (string)(await cmd.ExecuteScalarAsync())!;
     }
+
+    /// <summary>SQL returning the comment on the test schema's function or procedure with the given name.</summary>
+    private string RoutineCommentSql(string routineName) => $"""
+        SELECT obj_description(p.oid, 'pg_proc')
+        FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = '{_schema}' AND p.proname = '{routineName}'
+        """;
 
     /// <summary>The enum's labels in comparison order, comma-joined.</summary>
     private Task<string> EnumLabels(string enumName) => ScalarString($"""
