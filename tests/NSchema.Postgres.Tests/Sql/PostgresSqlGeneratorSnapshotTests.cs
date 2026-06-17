@@ -1,7 +1,6 @@
 using NSchema.Plan.Model;
 using NSchema.Postgres.Sql;
 using NSchema.Schema.Model;
-using NSchema.Scripts.Model;
 using NSchema.Sql;
 
 namespace NSchema.Postgres.Tests.Sql;
@@ -212,4 +211,24 @@ public sealed class PostgresSqlGeneratorSnapshotTests
 
     private static AlterColumnType Alter(SqlType type) =>
         new("public", "t", "c", SqlType.Int, type);
+
+    // ── Deployment scripts ────────────────────────────────────────────────────
+
+    [Fact]
+    public void DeploymentScript_RunOutsideTransaction_IsCarriedOntoTheStatement()
+    {
+        // A script declared `run_outside_transaction = true` (e.g. CREATE INDEX CONCURRENTLY, which Postgres forbids
+        // inside a transaction) must carry the flag through to the generated statement so the executor carves it out;
+        // an ordinary script must not.
+        var concurrent = new Script("reindex", "CREATE INDEX CONCURRENTLY i ON s.t (c)", ScriptType.PostDeployment)
+        {
+            RunOutsideTransaction = true,
+        };
+        var ordinary = new Script("seed", "INSERT INTO s.t VALUES (1)", ScriptType.PreDeployment);
+
+        var plan = Generator.Generate(new MigrationPlan([], [ordinary], [concurrent]));
+
+        plan.Statements.Single(s => s.Sql.Contains("INSERT")).RunOutsideTransaction.ShouldBeFalse();
+        plan.Statements.Single(s => s.Sql.Contains("CONCURRENTLY")).RunOutsideTransaction.ShouldBeTrue();
+    }
 }
