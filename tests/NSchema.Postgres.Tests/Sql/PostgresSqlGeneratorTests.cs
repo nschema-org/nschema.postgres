@@ -3,8 +3,6 @@ using NSchema.Plan.Model;
 using NSchema.Postgres.Sql;
 using NSchema.Postgres.Tests.Fixtures;
 using NSchema.Schema.Model;
-using NSchema.Scripts.Model;
-using NSchema.Sql;
 using NSchema.Sql.Model;
 
 namespace NSchema.Postgres.Tests.Sql;
