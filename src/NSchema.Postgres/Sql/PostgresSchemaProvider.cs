@@ -411,29 +411,38 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         await using var cmd = conn.CreateCommand();
         // Exclude primary-key indexes and any index that backs a constraint (a UNIQUE constraint's implicit index
         // surfaces as a UniqueConstraint, not a TableIndex). Standalone CREATE UNIQUE INDEXes have no backing
-        // constraint, so they are still returned. Exclude expression indexes (attnum = 0).
+        // constraint, so they are still returned.
+        //
+        // Columns are read positionally (indkey order, all indnatts of them — keys then INCLUDE): a plain column
+        // is its attname; an expression key (attnum = 0) is its pg_get_indexdef text. indnkeyatts marks the
+        // key/INCLUDE split, indoption carries per-key ASC/DESC + NULLS bits, and the access method is btree-folded
+        // to null (the default) so a plain index round-trips clean.
         cmd.CommandText = """
             SELECT
                 n.nspname  AS schema_name,
                 t.relname  AS table_name,
                 i.relname  AS index_name,
                 ix.indisunique AS is_unique,
-                array_agg(a.attname ORDER BY k.ordinality) AS column_names,
-                pg_get_expr(ix.indpred, ix.indrelid) AS predicate
+                NULLIF(am.amname, 'btree') AS method,
+                ix.indnkeyatts AS num_key_atts,
+                pg_get_expr(ix.indpred, ix.indrelid) AS predicate,
+                array_agg(CASE WHEN k.attnum = 0 THEN pg_get_indexdef(ix.indexrelid, k.ordinality::int, true) ELSE a.attname END ORDER BY k.ordinality) AS column_texts,
+                array_agg(k.attnum = 0 ORDER BY k.ordinality) AS is_expressions,
+                array_agg(COALESCE((string_to_array(ix.indoption::text, ' '))[k.ordinality]::int, 0) ORDER BY k.ordinality) AS options
             FROM pg_index ix
             JOIN pg_class     t ON t.oid = ix.indrelid
             JOIN pg_class     i ON i.oid = ix.indexrelid
             JOIN pg_namespace n ON n.oid = t.relnamespace
+            JOIN pg_am        am ON am.oid = i.relam
             JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS k(attnum, ordinality) ON TRUE
-            JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
+            LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
             WHERE (@schemas::text[] IS NULL OR n.nspname = ANY(@schemas))
             AND n.nspname NOT IN ('pg_catalog', 'information_schema')
             AND n.nspname NOT LIKE 'pg\_toast%' ESCAPE '\'
             AND n.nspname NOT LIKE 'pg\_temp%' ESCAPE '\'
             AND NOT ix.indisprimary
             AND NOT EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = i.oid)
-            AND k.attnum > 0
-            GROUP BY n.nspname, t.relname, i.relname, ix.indisunique, ix.indpred, ix.indrelid
+            GROUP BY n.nspname, t.relname, i.relname, ix.indisunique, am.amname, ix.indnkeyatts, ix.indpred, ix.indrelid, ix.indexrelid
             ORDER BY n.nspname, t.relname, i.relname
             """;
         AddSchemasParameter(cmd, schemas);
@@ -446,8 +455,12 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
                 TableName: reader.GetString(1),
                 IndexName: reader.GetString(2),
                 IsUnique: reader.GetBoolean(3),
-                ColumnNames: reader.GetFieldValue<string[]>(4),
-                Predicate: reader.IsDBNull(5) ? null : reader.GetString(5)
+                Method: reader.IsDBNull(4) ? null : reader.GetString(4),
+                NumKeyAtts: reader.GetInt16(5),
+                Predicate: reader.IsDBNull(6) ? null : reader.GetString(6),
+                ColumnTexts: reader.GetFieldValue<string[]>(7),
+                IsExpressions: reader.GetFieldValue<bool[]>(8),
+                Options: reader.GetFieldValue<int[]>(9)
             ));
         }
 
@@ -1204,10 +1217,7 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
 
         var idxs = allIndexes
             .Where(i => i.SchemaName == tableRow.Schema && i.TableName == tableRow.Name)
-            .Select(i => new TableIndex(
-                i.IndexName, i.ColumnNames.Select(c => new IndexColumn(c)).ToList(), i.IsUnique,
-                indexComments.GetValueOrDefault((tableRow.Schema, i.IndexName)),
-                i.Predicate))
+            .Select(i => MapIndex(i, indexComments.GetValueOrDefault((tableRow.Schema, i.IndexName))))
             .ToList();
 
         tableComments.TryGetValue((tableRow.Schema, tableRow.Name), out var tableComment);
@@ -1233,6 +1243,42 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
     }
 
     // ── Mapping ───────────────────────────────────────────────────────────────
+
+    private static TableIndex MapIndex(IndexRow row, string? comment)
+    {
+        var keys = new List<IndexColumn>();
+        var include = new List<string>();
+        for (var i = 0; i < row.ColumnTexts.Length; i++)
+        {
+            if (i < row.NumKeyAtts)
+            {
+                var (sort, nulls) = DecodeIndexOption(row.Options[i]);
+                keys.Add(new IndexColumn(row.ColumnTexts[i], row.IsExpressions[i], sort, nulls));
+            }
+            else
+            {
+                // INCLUDE columns are always plain columns and carry no ordering.
+                include.Add(row.ColumnTexts[i]);
+            }
+        }
+
+        return new TableIndex(row.IndexName, keys, row.IsUnique, comment, row.Predicate, row.Method, include);
+    }
+
+    // indoption packs two bits per key: 0x01 = DESC, 0x02 = NULLS FIRST. The engine default is NULLS LAST for an
+    // ascending key and NULLS FIRST for a descending one (i.e. the default of the NULLS-FIRST bit equals the DESC
+    // bit), so a key matching that default normalizes to Default/Default and a plain index round-trips without
+    // phantom drift — only an explicitly non-default ordering surfaces.
+    private static (IndexSort Sort, IndexNulls Nulls) DecodeIndexOption(int option)
+    {
+        var descending = (option & 1) != 0;
+        var nullsFirst = (option & 2) != 0;
+        var sort = descending ? IndexSort.Descending : IndexSort.Default;
+        var nulls = nullsFirst == descending
+            ? IndexNulls.Default
+            : nullsFirst ? IndexNulls.First : IndexNulls.Last;
+        return (sort, nulls);
+    }
 
     private static Column MapColumn(ColumnRow row, Dictionary<(string, string, string), string?> columnComments)
     {

@@ -9,6 +9,7 @@ using NSchema.Plan.Model.Sequence;
 using NSchema.Plan.Model.Tables;
 using NSchema.Plan.Model.Views;
 using NSchema.Schema.Model.Columns;
+using NSchema.Schema.Model.Indexes;
 using NSchema.Schema.Model.Routines;
 using NSchema.Schema.Model.Sequences;
 using NSchema.Schema.Model.Tables;
@@ -150,11 +151,33 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
 
     private static string BuildCreateIndex(CreateIndex x)
     {
-        // Baseline: render plain column keys exactly as before. Access method, INCLUDE, expression keys, and
-        // per-key ordering carried on the richer index model are handled by the index-depth feature work.
-        var keys = ColList(x.Index.Columns.Select(c => c.Expression).ToList());
-        var sql = $"""CREATE {(x.Index.IsUnique ? "UNIQUE " : "")}INDEX "{x.Index.Name}" ON "{x.SchemaName}"."{x.TableName}" ({keys})""";
-        return x.Index.Predicate is { } pred ? $"{sql} WHERE {pred}" : sql;
+        var idx = x.Index;
+        var method = idx.Method is { } m ? $" USING {m}" : "";
+        var keys = string.Join(", ", idx.Columns.Select(IndexKeyText));
+        var include = idx.Include.Count > 0 ? $" INCLUDE ({ColList(idx.Include)})" : "";
+        var sql = $"""CREATE {(idx.IsUnique ? "UNIQUE " : "")}INDEX "{idx.Name}" ON "{x.SchemaName}"."{x.TableName}"{method} ({keys}){include}""";
+        return idx.Predicate is { } pred ? $"{sql} WHERE {pred}" : sql;
+    }
+
+    // A plain column key is quoted; an expression key is emitted parenthesised and verbatim. ASC/DESC and
+    // NULLS FIRST/LAST are rendered only when explicit (IndexSort/IndexNulls.Default omits them, letting the
+    // engine default stand so the index introspects back without drift).
+    private static string IndexKeyText(IndexColumn col)
+    {
+        var key = col.IsExpression ? $"({col.Expression})" : $"\"{col.Expression}\"";
+        var sort = col.Sort switch
+        {
+            IndexSort.Ascending => " ASC",
+            IndexSort.Descending => " DESC",
+            _ => "",
+        };
+        var nulls = col.Nulls switch
+        {
+            IndexNulls.First => " NULLS FIRST",
+            IndexNulls.Last => " NULLS LAST",
+            _ => "",
+        };
+        return $"{key}{sort}{nulls}";
     }
 
     private static string BuildColumnDef(Column col)

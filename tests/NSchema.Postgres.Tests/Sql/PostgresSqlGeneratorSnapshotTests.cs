@@ -106,6 +106,11 @@ public sealed class PostgresSqlGeneratorSnapshotTests
     public Task IndexOperations() => VerifyPlan(
         new CreateIndex("public", "users", new TableIndex("idx_users_email", ["email"], IsUnique: true)),
         new CreateIndex("public", "users", new TableIndex("idx_users_active", ["created_at"], Predicate: "notes IS NOT NULL")),
+        // An access method (USING), a covering INCLUDE, descending / nulls ordering, and an expression key.
+        new CreateIndex("public", "users", new TableIndex("idx_users_tags", ["tags"], Method: "gin")),
+        new CreateIndex("public", "users", new TableIndex("idx_users_recent",
+            [new IndexColumn("created_at", Sort: IndexSort.Descending, Nulls: IndexNulls.Last), new IndexColumn("lower(email)", IsExpression: true)],
+            Include: ["id", "notes"])),
         new DropIndex("public", "users", "idx_users_email"));
 
     // ── Views ─────────────────────────────────────────────────────────────────

@@ -498,6 +498,49 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
     }
 
     [Fact]
+    public async Task CreateIndex_RichIndex_RoundTripsThroughIntrospection()
+    {
+        // Arrange — a covering index with a descending key, an explicit non-default null ordering, and an
+        // expression key. What is applied must introspect back to the same shape (no phantom drift).
+        await Exec($"""CREATE TABLE "{_schema}"."items" (id integer, name text, qty integer)""");
+        var index = new TableIndex("idx_items_rich",
+            [new IndexColumn("id", Sort: IndexSort.Descending, Nulls: IndexNulls.Last), new IndexColumn("lower(name)", IsExpression: true)],
+            Include: ["qty"]);
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new CreateIndex(_schema, "items", index)], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        var provider = new PostgresSchemaProvider(_dataSource);
+        var introspected = (await provider.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Tables[0].Indexes.ShouldHaveSingleItem();
+        introspected.Method.ShouldBeNull(); // btree folds to null
+        introspected.Include.ShouldBe(["qty"]);
+        introspected.Columns.Count.ShouldBe(2);
+        introspected.Columns[0].ShouldBe(new IndexColumn("id", IsExpression: false, Sort: IndexSort.Descending, Nulls: IndexNulls.Last));
+        introspected.Columns[1].IsExpression.ShouldBeTrue();
+        introspected.Columns[1].Expression.ShouldContain("lower");
+    }
+
+    [Fact]
+    public async Task CreateIndex_GinMethod_RoundTripsPreservingMethod()
+    {
+        // Arrange — a non-btree access method must survive introspection (it does not fold to null).
+        await Exec($"""CREATE TABLE "{_schema}"."docs" (tags text[])""");
+        var index = new TableIndex("idx_docs_tags", ["tags"], Method: "gin");
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new CreateIndex(_schema, "docs", index)], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        var provider = new PostgresSchemaProvider(_dataSource);
+        var introspected = (await provider.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Tables[0].Indexes.ShouldHaveSingleItem();
+        introspected.Method.ShouldBe("gin");
+        introspected.Columns.ShouldHaveSingleItem().Expression.ShouldBe("tags");
+    }
+
+    [Fact]
     public async Task DropIndex_RemovesIndexFromTable()
     {
         // Arrange
