@@ -10,6 +10,7 @@ using NSchema.Plan.Model.Routines;
 using NSchema.Plan.Model.Schemas;
 using NSchema.Plan.Model.Sequence;
 using NSchema.Plan.Model.Tables;
+using NSchema.Plan.Model.Triggers;
 using NSchema.Plan.Model.Views;
 using NSchema.Schema.Model.Columns;
 using NSchema.Schema.Model.CompositeTypes;
@@ -19,6 +20,7 @@ using NSchema.Schema.Model.Indexes;
 using NSchema.Schema.Model.Routines;
 using NSchema.Schema.Model.Sequences;
 using NSchema.Schema.Model.Tables;
+using NSchema.Schema.Model.Triggers;
 using NSchema.Sql;
 using NSchema.Sql.Model;
 
@@ -78,6 +80,11 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
         DropExclusionConstraint x => $"ALTER TABLE \"{x.SchemaName}\".\"{x.TableName}\" DROP CONSTRAINT \"{x.ConstraintName}\"",
         CreateIndex x => BuildCreateIndex(x),
         DropIndex x => $"DROP INDEX \"{x.SchemaName}\".\"{x.IndexName}\"",
+        CreateTrigger x => BuildCreateTrigger(x),
+        DropTrigger x => $"DROP TRIGGER \"{x.TriggerName}\" ON \"{x.SchemaName}\".\"{x.TableName}\"",
+        SetTriggerComment x => x.NewComment is null
+            ? $"""COMMENT ON TRIGGER "{x.TriggerName}" ON "{x.SchemaName}"."{x.TableName}" IS NULL"""
+            : $"""COMMENT ON TRIGGER "{x.TriggerName}" ON "{x.SchemaName}"."{x.TableName}" IS $comment${x.NewComment}$comment$""",
         // A view Add and a body Modify both arrive as CreateView; CREATE OR REPLACE serves both. An incompatible
         // output-column change (rename/drop/retype/reorder) is rejected loudly by Postgres rather than silently
         // dropping dependents — see CLAUDE.md / the core view-body decision.
@@ -461,6 +468,51 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
         {
             yield return new SqlStatement($"""COMMENT ON DOMAIN "{x.SchemaName}"."{x.Domain.Name}" IS $comment${comment}$comment$""");
         }
+    }
+
+    // CREATE TRIGGER name {BEFORE|AFTER|INSTEAD OF} {event [OR …]} ON s.t FOR EACH {ROW|STATEMENT}
+    //   [WHEN (cond)] EXECUTE FUNCTION fn(args)
+    private static string BuildCreateTrigger(CreateTrigger x)
+    {
+        var t = x.Trigger;
+        var sb = new StringBuilder(
+            $"""CREATE TRIGGER "{t.Name}" {TriggerTimingText(t.Timing)} {TriggerEventsText(t)} ON "{x.SchemaName}"."{x.TableName}" FOR EACH {(t.Level == TriggerLevel.Row ? "ROW" : "STATEMENT")}""");
+        if (t.When is { } when)
+        {
+            sb.Append($" WHEN ({when})");
+        }
+        sb.Append($" EXECUTE FUNCTION {t.Function}({t.FunctionArguments ?? string.Empty})");
+        return sb.ToString();
+    }
+
+    private static string TriggerTimingText(TriggerTiming timing) => timing switch
+    {
+        TriggerTiming.Before => "BEFORE",
+        TriggerTiming.After => "AFTER",
+        TriggerTiming.InsteadOf => "INSTEAD OF",
+        _ => throw new ArgumentOutOfRangeException(nameof(timing), timing, "Unknown trigger timing."),
+    };
+
+    private static string TriggerEventsText(Trigger trigger)
+    {
+        var parts = new List<string>(4);
+        if (trigger.Events.HasFlag(TriggerEvent.Insert))
+        {
+            parts.Add("INSERT");
+        }
+        if (trigger.Events.HasFlag(TriggerEvent.Update))
+        {
+            parts.Add(trigger.UpdateOfColumns.Count > 0 ? $"UPDATE OF {ColList(trigger.UpdateOfColumns)}" : "UPDATE");
+        }
+        if (trigger.Events.HasFlag(TriggerEvent.Delete))
+        {
+            parts.Add("DELETE");
+        }
+        if (trigger.Events.HasFlag(TriggerEvent.Truncate))
+        {
+            parts.Add("TRUNCATE");
+        }
+        return string.Join(" OR ", parts);
     }
 
     private static string ViewKind(bool isMaterialized) => isMaterialized ? "MATERIALIZED VIEW" : "VIEW";

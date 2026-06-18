@@ -10,6 +10,7 @@ using NSchema.Plan.Model.Routines;
 using NSchema.Plan.Model.Schemas;
 using NSchema.Plan.Model.Sequence;
 using NSchema.Plan.Model.Tables;
+using NSchema.Plan.Model.Triggers;
 using NSchema.Plan.Model.Views;
 using NSchema.Postgres.Sql;
 using NSchema.Postgres.Tests.Fixtures;
@@ -23,6 +24,7 @@ using NSchema.Schema.Model.Routines;
 using NSchema.Schema.Model.Scripts;
 using NSchema.Schema.Model.Sequences;
 using NSchema.Schema.Model.Tables;
+using NSchema.Schema.Model.Triggers;
 using NSchema.Schema.Model.Views;
 using NSchema.Sql.Model;
 
@@ -763,6 +765,35 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         index.Name.ShouldBe("idx_totals_id");
         index.IsUnique.ShouldBeTrue();
         index.Columns.ShouldHaveSingleItem().Expression.ShouldBe("id");
+    }
+
+    // ── Triggers ──────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task RoundTrip_Trigger_IntrospectsWithDecodedAttributes()
+    {
+        // Arrange — a trigger function, then a row-level AFTER trigger with UPDATE OF and a WHEN condition.
+        await Exec($"""CREATE TABLE "{_schema}".users (id int, email text, active boolean)""");
+        await Exec($"""CREATE FUNCTION "{_schema}".audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$""");
+        var trigger = new Trigger("users_audit", TriggerTiming.After, TriggerEvent.Insert | TriggerEvent.Update,
+            $"{_schema}.audit", TriggerLevel.Row, UpdateOfColumns: ["email"], When: "new.active");
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new CreateTrigger(_schema, "users", trigger)], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert — the tgtype bitmask decodes back to the same timing/level/events.
+        var provider = new PostgresSchemaProvider(_dataSource);
+        var introspected = (await provider.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Tables[0].Triggers.ShouldHaveSingleItem();
+        introspected.Name.ShouldBe("users_audit");
+        introspected.Timing.ShouldBe(TriggerTiming.After);
+        introspected.Level.ShouldBe(TriggerLevel.Row);
+        introspected.Events.ShouldBe(TriggerEvent.Insert | TriggerEvent.Update);
+        introspected.UpdateOfColumns.ShouldBe(["email"]);
+        introspected.Function.ShouldBe($"{_schema}.audit");
+        introspected.When.ShouldNotBeNull();
+        introspected.When!.ShouldContain("active");
+        introspected.FunctionArguments.ShouldBeNull();
     }
 
     // ── Composite types ──────────────────────────────────────────────────────

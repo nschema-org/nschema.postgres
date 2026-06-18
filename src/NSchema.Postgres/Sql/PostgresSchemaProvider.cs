@@ -13,6 +13,7 @@ using NSchema.Schema.Model.Routines;
 using NSchema.Schema.Model.Schemas;
 using NSchema.Schema.Model.Sequences;
 using NSchema.Schema.Model.Tables;
+using NSchema.Schema.Model.Triggers;
 using NSchema.Schema.Model.Views;
 
 namespace NSchema.Postgres.Sql;
@@ -37,6 +38,7 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         var checkConstraints = await QueryCheckConstraints(conn, schemas, cancellationToken);
         var exclusionConstraints = await QueryExclusionConstraints(conn, schemas, cancellationToken);
         var indexes = await QueryIndexes(conn, schemas, cancellationToken);
+        var triggers = await QueryTriggers(conn, schemas, cancellationToken);
         var schemaComments = await QuerySchemaComments(conn, schemas, cancellationToken);
         var tableComments = await QueryTableComments(conn, schemas, cancellationToken);
         var columnComments = await QueryColumnComments(conn, schemas, cancellationToken);
@@ -61,7 +63,7 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         var procedureComments = await QueryRoutineComments(conn, schemas, ProcedureKind, cancellationToken);
 
         return Build(
-            tables, columns, primaryKeys, foreignKeys, uniqueConstraints, checkConstraints, exclusionConstraints, indexes,
+            tables, columns, primaryKeys, foreignKeys, uniqueConstraints, checkConstraints, exclusionConstraints, indexes, triggers,
             schemaComments, tableComments, columnComments, indexComments, constraintComments,
             schemaGrants, tableGrants, views, viewComments, viewDependencies,
             enums, enumComments, sequences, sequenceComments,
@@ -606,6 +608,64 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
                 MaxLength: reader.IsDBNull(6) ? null : reader.GetInt32(6),
                 Precision: reader.IsDBNull(7) ? null : reader.GetInt32(7),
                 Scale: reader.IsDBNull(8) ? null : reader.GetInt32(8)
+            ));
+        }
+
+        return rows;
+    }
+
+    private static async Task<List<TriggerRow>> QueryTriggers(NpgsqlConnection conn, string[]? schemas, CancellationToken ct)
+    {
+        var rows = new List<TriggerRow>();
+        await using var cmd = conn.CreateCommand();
+        // User triggers only — NOT tgisinternal excludes the system triggers that enforce foreign keys and other
+        // constraints. tgtype is a bitmask (timing/level/events) decoded when mapped; the UPDATE OF column set comes
+        // from tgattr. The WHEN condition and the function arguments are both pulled out of pg_get_triggerdef (its
+        // canonical form): pg_get_expr cannot render a WHEN that references both OLD and NEW, and there is no clean
+        // catalog column for the decoded arguments.
+        cmd.CommandText = """
+            SELECT
+                n.nspname AS table_schema,
+                c.relname AS table_name,
+                t.tgname  AS trigger_name,
+                t.tgtype  AS tg_type,
+                fn.nspname || '.' || p.proname AS function,
+                substring(td.def FROM 'WHEN \((.*)\) EXECUTE (?:FUNCTION|PROCEDURE)') AS when_expr,
+                COALESCE(
+                    (SELECT array_agg(a.attname ORDER BY k.ord)
+                     FROM unnest(string_to_array(NULLIF(t.tgattr::text, ''), ' ')::int[]) WITH ORDINALITY AS k(attnum, ord)
+                     JOIN pg_attribute a ON a.attrelid = t.tgrelid AND a.attnum = k.attnum),
+                    ARRAY[]::text[]) AS update_of_columns,
+                substring(td.def FROM 'EXECUTE (?:FUNCTION|PROCEDURE) [^(]+\((.*)\)$') AS function_args,
+                obj_description(t.oid, 'pg_trigger') AS comment
+            FROM pg_trigger   t
+            JOIN pg_class     c  ON c.oid = t.tgrelid
+            JOIN pg_namespace n  ON n.oid = c.relnamespace
+            JOIN pg_proc      p  ON p.oid = t.tgfoid
+            JOIN pg_namespace fn ON fn.oid = p.pronamespace
+            CROSS JOIN LATERAL (SELECT pg_get_triggerdef(t.oid) AS def) td
+            WHERE NOT t.tgisinternal
+            AND (@schemas::text[] IS NULL OR n.nspname = ANY(@schemas))
+            AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+            AND n.nspname NOT LIKE 'pg\_toast%' ESCAPE '\'
+            AND n.nspname NOT LIKE 'pg\_temp%' ESCAPE '\'
+            ORDER BY n.nspname, c.relname, t.tgname
+            """;
+        AddSchemasParameter(cmd, schemas);
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows.Add(new TriggerRow(
+                TableSchema: reader.GetString(0),
+                TableName: reader.GetString(1),
+                Name: reader.GetString(2),
+                TgType: reader.GetInt16(3),
+                Function: reader.GetString(4),
+                When: reader.IsDBNull(5) ? null : StripEnclosingParens(reader.GetString(5)),
+                UpdateOfColumns: reader.GetFieldValue<string[]>(6),
+                FunctionArguments: reader.IsDBNull(7) || reader.GetString(7).Length == 0 ? null : reader.GetString(7),
+                Comment: reader.IsDBNull(8) ? null : reader.GetString(8)
             ));
         }
 
@@ -1278,6 +1338,7 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         List<CheckConstraintRow> checkConstraints,
         List<ExclusionConstraintRow> exclusionConstraints,
         List<IndexRow> indexes,
+        List<TriggerRow> triggers,
         Dictionary<string, string?> schemaComments,
         Dictionary<(string, string), string?> tableComments,
         Dictionary<(string, string, string), string?> columnComments,
@@ -1306,7 +1367,7 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
             .GroupBy(t => t.Schema)
             .ToDictionary(
                 g => g.Key,
-                g => g.Select(t => BuildTable(t, columns, primaryKeys, foreignKeys, uniqueConstraints, checkConstraints, exclusionConstraints, indexes, tableComments, columnComments, indexComments, constraintComments, tableGrants)).ToList());
+                g => g.Select(t => BuildTable(t, columns, primaryKeys, foreignKeys, uniqueConstraints, checkConstraints, exclusionConstraints, indexes, triggers, tableComments, columnComments, indexComments, constraintComments, tableGrants)).ToList());
 
         var viewsBySchema = views
             .GroupBy(v => v.Schema)
@@ -1451,6 +1512,7 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         List<CheckConstraintRow> allCheckConstraints,
         List<ExclusionConstraintRow> allExclusionConstraints,
         List<IndexRow> allIndexes,
+        List<TriggerRow> allTriggers,
         Dictionary<(string, string), string?> tableComments,
         Dictionary<(string, string, string), string?> columnComments,
         Dictionary<(string, string), string?> indexComments,
@@ -1497,6 +1559,11 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
             .Select(i => MapIndex(i, indexComments.GetValueOrDefault((tableRow.Schema, i.IndexName))))
             .ToList();
 
+        var triggers = allTriggers
+            .Where(t => t.TableSchema == tableRow.Schema && t.TableName == tableRow.Name)
+            .Select(MapTrigger)
+            .ToList();
+
         tableComments.TryGetValue((tableRow.Schema, tableRow.Name), out var tableComment);
 
         var grants = allTableGrants
@@ -1516,8 +1583,29 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
             CheckConstraints: checks,
             ExclusionConstraints: exclusions,
             Indexes: idxs,
-            Grants: grants
+            Grants: grants,
+            Triggers: triggers
         );
+    }
+
+    // tgtype is a bitmask: bit 0 = ROW (else STATEMENT); bit 6 = INSTEAD OF, else bit 1 = BEFORE, else AFTER;
+    // bits 2/3/4/5 = INSERT/DELETE/UPDATE/TRUNCATE. The model's TriggerEvent flags differ from these bit values,
+    // so the events are translated rather than copied.
+    private static Trigger MapTrigger(TriggerRow row)
+    {
+        var timing = (row.TgType & 64) != 0 ? TriggerTiming.InsteadOf
+            : (row.TgType & 2) != 0 ? TriggerTiming.Before
+            : TriggerTiming.After;
+        var level = (row.TgType & 1) != 0 ? TriggerLevel.Row : TriggerLevel.Statement;
+
+        var events = TriggerEvent.None;
+        if ((row.TgType & 4) != 0) events |= TriggerEvent.Insert;
+        if ((row.TgType & 8) != 0) events |= TriggerEvent.Delete;
+        if ((row.TgType & 16) != 0) events |= TriggerEvent.Update;
+        if ((row.TgType & 32) != 0) events |= TriggerEvent.Truncate;
+
+        return new Trigger(row.Name, timing, events, row.Function, level,
+            UpdateOfColumns: row.UpdateOfColumns, When: row.When, FunctionArguments: row.FunctionArguments, Comment: row.Comment);
     }
 
     private static CompositeType MapCompositeType(CompositeTypeRow row, List<CompositeFieldRow> allFields)

@@ -9,6 +9,7 @@ using NSchema.Plan.Model.Routines;
 using NSchema.Plan.Model.Schemas;
 using NSchema.Plan.Model.Sequence;
 using NSchema.Plan.Model.Tables;
+using NSchema.Plan.Model.Triggers;
 using NSchema.Plan.Model.Views;
 using NSchema.Postgres.Sql;
 using NSchema.Schema.Model.Columns;
@@ -21,6 +22,7 @@ using NSchema.Schema.Model.Routines;
 using NSchema.Schema.Model.Scripts;
 using NSchema.Schema.Model.Sequences;
 using NSchema.Schema.Model.Tables;
+using NSchema.Schema.Model.Triggers;
 using NSchema.Schema.Model.Views;
 using NSchema.Sql;
 
@@ -141,6 +143,18 @@ public sealed class PostgresSqlGeneratorSnapshotTests
         new AddExclusionConstraint("public", "events", new ExclusionConstraint("no_clash",
             [new ExclusionElement("tstzrange(starts, ends)", "&&", IsExpression: true)], Method: "gist")),
         new DropExclusionConstraint("public", "bookings", "no_overlap"));
+
+    // ── Triggers ──────────────────────────────────────────────────────────────
+
+    [Fact]
+    public Task TriggerOperations() => VerifyPlan(
+        new CreateTrigger("public", "users", new Trigger("users_audit", TriggerTiming.After,
+            TriggerEvent.Insert | TriggerEvent.Update, "public.log_change", TriggerLevel.Row,
+            UpdateOfColumns: ["email", "name"], When: "new.active", FunctionArguments: "'audit'")),
+        new CreateTrigger("public", "logs", new Trigger("logs_truncate", TriggerTiming.Before,
+            TriggerEvent.Truncate, "public.on_truncate", TriggerLevel.Statement)),
+        new SetTriggerComment("public", "users", "users_audit", null, "audit changes"),
+        new DropTrigger("public", "users", "users_audit"));
 
     // ── Views ─────────────────────────────────────────────────────────────────
 
