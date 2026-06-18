@@ -1,5 +1,6 @@
 using NSchema.Plan.Model;
 using NSchema.Plan.Model.Columns;
+using NSchema.Plan.Model.CompositeTypes;
 using NSchema.Plan.Model.Constraints;
 using NSchema.Plan.Model.Domains;
 using NSchema.Plan.Model.Enums;
@@ -11,6 +12,7 @@ using NSchema.Plan.Model.Tables;
 using NSchema.Plan.Model.Views;
 using NSchema.Postgres.Sql;
 using NSchema.Schema.Model.Columns;
+using NSchema.Schema.Model.CompositeTypes;
 using NSchema.Schema.Model.Constraints;
 using NSchema.Schema.Model.Domains;
 using NSchema.Schema.Model.Enums;
@@ -172,6 +174,19 @@ public sealed class PostgresSqlGeneratorSnapshotTests
         new SetEnumComment("public", "order_status", null, "Order lifecycle"),
         new SetEnumComment("public", "order_status", "Order lifecycle", null),
         new DropEnum("public", "order_status"));
+
+    // ── Composite types ──────────────────────────────────────────────────────
+
+    [Fact]
+    public Task CompositeTypeOperations() => VerifyPlan(
+        new CreateCompositeType("public", new CompositeType("address",
+            [new CompositeField("street", SqlType.Text), new CompositeField("zip", SqlType.Int)])),
+        new AddCompositeField("public", "address", new CompositeField("country", SqlType.Text)),
+        new AlterCompositeFieldType("public", "address", "zip", SqlType.Int, SqlType.VarChar(10)),
+        new DropCompositeField("public", "address", "country"),
+        new RenameCompositeType("public", "old_address", "address"),
+        new SetCompositeTypeComment("public", "address", null, "a postal address"),
+        new DropCompositeType("public", "address"));
 
     // ── Domains ────────────────────────────────────────────────────────────────
 

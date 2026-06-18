@@ -4,6 +4,7 @@ using NSchema.Postgres.Models;
 using NSchema.Schema;
 using NSchema.Schema.Model;
 using NSchema.Schema.Model.Columns;
+using NSchema.Schema.Model.CompositeTypes;
 using NSchema.Schema.Model.Constraints;
 using NSchema.Schema.Model.Domains;
 using NSchema.Schema.Model.Enums;
@@ -52,6 +53,8 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         var sequenceComments = await QuerySequenceComments(conn, schemas, cancellationToken);
         var domains = await QueryDomains(conn, schemas, cancellationToken);
         var domainChecks = await QueryDomainChecks(conn, schemas, cancellationToken);
+        var compositeTypes = await QueryCompositeTypes(conn, schemas, cancellationToken);
+        var compositeFields = await QueryCompositeFields(conn, schemas, cancellationToken);
         var functions = await QueryRoutines(conn, schemas, FunctionKind, cancellationToken);
         var functionComments = await QueryRoutineComments(conn, schemas, FunctionKind, cancellationToken);
         var procedures = await QueryRoutines(conn, schemas, ProcedureKind, cancellationToken);
@@ -62,7 +65,7 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
             schemaComments, tableComments, columnComments, indexComments, constraintComments,
             schemaGrants, tableGrants, views, viewComments, viewDependencies,
             enums, enumComments, sequences, sequenceComments,
-            domains, domainChecks,
+            domains, domainChecks, compositeTypes, compositeFields,
             functions, functionComments, procedures, procedureComments
         );
     }
@@ -522,6 +525,87 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
                 DomainName: reader.GetString(1),
                 CheckName: reader.GetString(2),
                 Expression: StripCheckWrapper(reader.GetString(3))
+            ));
+        }
+
+        return rows;
+    }
+
+    private static async Task<List<CompositeTypeRow>> QueryCompositeTypes(NpgsqlConnection conn, string[]? schemas, CancellationToken ct)
+    {
+        var rows = new List<CompositeTypeRow>();
+        await using var cmd = conn.CreateCommand();
+        // Standalone composite types only: every table/view/sequence also has a composite type in pg_type (its row
+        // type), so the backing pg_class is joined and filtered to relkind 'c' — a free-standing CREATE TYPE — to
+        // exclude those relation row types.
+        cmd.CommandText = """
+            SELECT n.nspname AS schema_name,
+                   t.typname AS type_name,
+                   obj_description(t.oid, 'pg_type') AS comment
+            FROM pg_type t
+            JOIN pg_namespace n ON n.oid = t.typnamespace
+            JOIN pg_class     c ON c.oid = t.typrelid
+            WHERE t.typtype = 'c' AND c.relkind = 'c'
+            AND (@schemas::text[] IS NULL OR n.nspname = ANY(@schemas))
+            AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+            AND n.nspname NOT LIKE 'pg\_toast%' ESCAPE '\'
+            AND n.nspname NOT LIKE 'pg\_temp%' ESCAPE '\'
+            ORDER BY n.nspname, t.typname
+            """;
+        AddSchemasParameter(cmd, schemas);
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows.Add(new CompositeTypeRow(
+                Schema: reader.GetString(0),
+                Name: reader.GetString(1),
+                Comment: reader.IsDBNull(2) ? null : reader.GetString(2)
+            ));
+        }
+
+        return rows;
+    }
+
+    private static async Task<List<CompositeFieldRow>> QueryCompositeFields(NpgsqlConnection conn, string[]? schemas, CancellationToken ct)
+    {
+        var rows = new List<CompositeFieldRow>();
+        await using var cmd = conn.CreateCommand();
+        // information_schema.attributes lists composite-type fields in the same shape a column reports, so
+        // MapSqlType can be reused for the field type.
+        cmd.CommandText = """
+            SELECT
+                a.udt_schema,
+                a.udt_name,
+                a.attribute_name,
+                a.ordinal_position,
+                a.data_type,
+                a.attribute_udt_name,
+                a.character_maximum_length,
+                a.numeric_precision,
+                a.numeric_scale
+            FROM information_schema.attributes a
+            WHERE (@schemas::text[] IS NULL OR a.udt_schema = ANY(@schemas))
+            AND a.udt_schema NOT IN ('pg_catalog', 'information_schema')
+            AND a.udt_schema NOT LIKE 'pg\_toast%' ESCAPE '\'
+            AND a.udt_schema NOT LIKE 'pg\_temp%' ESCAPE '\'
+            ORDER BY a.udt_schema, a.udt_name, a.ordinal_position
+            """;
+        AddSchemasParameter(cmd, schemas);
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows.Add(new CompositeFieldRow(
+                Schema: reader.GetString(0),
+                TypeName: reader.GetString(1),
+                FieldName: reader.GetString(2),
+                OrdinalPosition: reader.GetInt32(3),
+                DataType: reader.GetString(4),
+                UdtName: reader.GetString(5),
+                MaxLength: reader.IsDBNull(6) ? null : reader.GetInt32(6),
+                Precision: reader.IsDBNull(7) ? null : reader.GetInt32(7),
+                Scale: reader.IsDBNull(8) ? null : reader.GetInt32(8)
             ));
         }
 
@@ -1210,6 +1294,8 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         Dictionary<(string, string), string?> sequenceComments,
         List<DomainRow> domains,
         List<DomainCheckRow> domainChecks,
+        List<CompositeTypeRow> compositeTypes,
+        List<CompositeFieldRow> compositeFields,
         List<RoutineRow> functions,
         Dictionary<(string, string), string?> functionComments,
         List<RoutineRow> procedures,
@@ -1257,6 +1343,10 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
             .GroupBy(d => d.Schema)
             .ToDictionary(g => g.Key, g => g.Select(d => MapDomain(d, domainChecks)).ToList());
 
+        var compositeTypesBySchema = compositeTypes
+            .GroupBy(c => c.Schema)
+            .ToDictionary(g => g.Key, g => g.Select(c => MapCompositeType(c, compositeFields)).ToList());
+
         // Drive schema list from what actually exists in the database, not from what was requested.
         var existingSchemas = schemaComments.Keys
             .Union(bySchema.Keys)
@@ -1265,6 +1355,7 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
             .Union(sequencesBySchema.Keys)
             .Union(routinesBySchema.Keys)
             .Union(domainsBySchema.Keys)
+            .Union(compositeTypesBySchema.Keys)
             .Union(schemaGrants.Select(g => g.SchemaName))
             .Distinct(StringComparer.OrdinalIgnoreCase);
 
@@ -1285,7 +1376,9 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
                     Routines: routinesBySchema.GetValueOrDefault(name, []),
                     DroppedRoutines: [],
                     Domains: domainsBySchema.GetValueOrDefault(name, []),
-                    DroppedDomains: []);
+                    DroppedDomains: [],
+                    CompositeTypes: compositeTypesBySchema.GetValueOrDefault(name, []),
+                    DroppedCompositeTypes: []);
             })
             .ToList();
 
@@ -1425,6 +1518,16 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
             Indexes: idxs,
             Grants: grants
         );
+    }
+
+    private static CompositeType MapCompositeType(CompositeTypeRow row, List<CompositeFieldRow> allFields)
+    {
+        var fields = allFields
+            .Where(f => f.Schema == row.Schema && f.TypeName == row.Name)
+            .OrderBy(f => f.OrdinalPosition)
+            .Select(f => new CompositeField(f.FieldName, MapSqlType(f.DataType, f.UdtName, domainSchema: null, domainName: null, f.MaxLength, f.Precision, f.Scale)))
+            .ToList();
+        return new CompositeType(row.Name, fields, OldName: null, Comment: row.Comment);
     }
 
     private static Domain MapDomain(DomainRow row, List<DomainCheckRow> allChecks)

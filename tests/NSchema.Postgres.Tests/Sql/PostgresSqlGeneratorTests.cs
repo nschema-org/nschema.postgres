@@ -1,6 +1,7 @@
 using Npgsql;
 using NSchema.Plan.Model;
 using NSchema.Plan.Model.Columns;
+using NSchema.Plan.Model.CompositeTypes;
 using NSchema.Plan.Model.Constraints;
 using NSchema.Plan.Model.Domains;
 using NSchema.Plan.Model.Enums;
@@ -13,6 +14,7 @@ using NSchema.Plan.Model.Views;
 using NSchema.Postgres.Sql;
 using NSchema.Postgres.Tests.Fixtures;
 using NSchema.Schema.Model.Columns;
+using NSchema.Schema.Model.CompositeTypes;
 using NSchema.Schema.Model.Constraints;
 using NSchema.Schema.Model.Domains;
 using NSchema.Schema.Model.Enums;
@@ -761,6 +763,28 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         index.Name.ShouldBe("idx_totals_id");
         index.IsUnique.ShouldBeTrue();
         index.Columns.ShouldHaveSingleItem().Expression.ShouldBe("id");
+    }
+
+    // ── Composite types ──────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task RoundTrip_CompositeType_IntrospectsWithFields()
+    {
+        // Arrange
+        var type = new CompositeType("address", [new CompositeField("street", SqlType.Text), new CompositeField("zip", SqlType.Int)]);
+
+        // Act — create, then exercise an in-place field add (ALTER TYPE … ADD ATTRIBUTE).
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new CreateCompositeType(_schema, type)], [], [])), TestContext.Current.CancellationToken);
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new AddCompositeField(_schema, "address", new CompositeField("country", SqlType.Text))], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        var provider = new PostgresSchemaProvider(_dataSource);
+        var introspected = (await provider.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].CompositeTypes.ShouldHaveSingleItem();
+        introspected.Name.ShouldBe("address");
+        introspected.Fields.Select(f => (f.Name, f.DataType)).ShouldBe(
+            [("street", SqlType.Text), ("zip", SqlType.Int), ("country", SqlType.Text)]);
     }
 
     // ── Domains ───────────────────────────────────────────────────────────────

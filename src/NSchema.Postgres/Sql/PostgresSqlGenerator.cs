@@ -1,6 +1,7 @@
 using System.Text;
 using NSchema.Plan.Model;
 using NSchema.Plan.Model.Columns;
+using NSchema.Plan.Model.CompositeTypes;
 using NSchema.Plan.Model.Constraints;
 using NSchema.Plan.Model.Domains;
 using NSchema.Plan.Model.Enums;
@@ -11,6 +12,7 @@ using NSchema.Plan.Model.Sequence;
 using NSchema.Plan.Model.Tables;
 using NSchema.Plan.Model.Views;
 using NSchema.Schema.Model.Columns;
+using NSchema.Schema.Model.CompositeTypes;
 using NSchema.Schema.Model.Constraints;
 using NSchema.Schema.Model.Domains;
 using NSchema.Schema.Model.Indexes;
@@ -107,6 +109,15 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
         SetDomainComment x => x.NewComment is null
             ? $"""COMMENT ON DOMAIN "{x.SchemaName}"."{x.DomainName}" IS NULL"""
             : $"""COMMENT ON DOMAIN "{x.SchemaName}"."{x.DomainName}" IS $comment${x.NewComment}$comment$""",
+        CreateCompositeType x => BuildCreateCompositeType(x),
+        DropCompositeType x => $"DROP TYPE \"{x.SchemaName}\".\"{x.TypeName}\"",
+        RenameCompositeType x => $"ALTER TYPE \"{x.SchemaName}\".\"{x.OldName}\" RENAME TO \"{x.NewName}\"",
+        SetCompositeTypeComment x => x.NewComment is null
+            ? $"""COMMENT ON TYPE "{x.SchemaName}"."{x.TypeName}" IS NULL"""
+            : $"""COMMENT ON TYPE "{x.SchemaName}"."{x.TypeName}" IS $comment${x.NewComment}$comment$""",
+        AddCompositeField x => $"""ALTER TYPE "{x.SchemaName}"."{x.TypeName}" ADD ATTRIBUTE "{x.Field.Name}" {ToPostgresType(x.Field.DataType)}""",
+        DropCompositeField x => $"ALTER TYPE \"{x.SchemaName}\".\"{x.TypeName}\" DROP ATTRIBUTE \"{x.FieldName}\"",
+        AlterCompositeFieldType x => $"""ALTER TYPE "{x.SchemaName}"."{x.TypeName}" ALTER ATTRIBUTE "{x.FieldName}" TYPE {ToPostgresType(x.NewType)}""",
         CreateSequence x => BuildCreateSequence(x),
         DropSequence x => $"DROP SEQUENCE \"{x.SchemaName}\".\"{x.SequenceName}\"",
         RenameSequence x => $"ALTER SEQUENCE \"{x.SchemaName}\".\"{x.OldName}\" RENAME TO \"{x.NewName}\"",
@@ -414,6 +425,12 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
         _ => throw new NotSupportedException(
             $"""Cannot make existing column "{x.SchemaName}"."{x.TableName}"."{x.ColumnName}" generated in place; PostgreSQL has no ADD GENERATED — drop and re-add the column."""),
     };
+
+    private static string BuildCreateCompositeType(CreateCompositeType x)
+    {
+        var fields = string.Join(", ", x.CompositeType.Fields.Select(f => $"\"{f.Name}\" {ToPostgresType(f.DataType)}"));
+        return $"""CREATE TYPE "{x.SchemaName}"."{x.CompositeType.Name}" AS ({fields})""";
+    }
 
     // CREATE DOMAIN name AS type [DEFAULT expr] [NOT NULL] [CONSTRAINT n CHECK (expr)]…
     private static string BuildCreateDomain(string schema, Domain domain)
