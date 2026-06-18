@@ -1,6 +1,7 @@
 using NSchema.Plan.Model;
 using NSchema.Plan.Model.Columns;
 using NSchema.Plan.Model.Constraints;
+using NSchema.Plan.Model.Domains;
 using NSchema.Plan.Model.Enums;
 using NSchema.Plan.Model.Indexes;
 using NSchema.Plan.Model.Routines;
@@ -11,6 +12,7 @@ using NSchema.Plan.Model.Views;
 using NSchema.Postgres.Sql;
 using NSchema.Schema.Model.Columns;
 using NSchema.Schema.Model.Constraints;
+using NSchema.Schema.Model.Domains;
 using NSchema.Schema.Model.Enums;
 using NSchema.Schema.Model.Indexes;
 using NSchema.Schema.Model.Routines;
@@ -170,6 +172,23 @@ public sealed class PostgresSqlGeneratorSnapshotTests
         new SetEnumComment("public", "order_status", null, "Order lifecycle"),
         new SetEnumComment("public", "order_status", "Order lifecycle", null),
         new DropEnum("public", "order_status"));
+
+    // ── Domains ────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public Task DomainOperations() => VerifyPlan(
+        new CreateDomain("public", new Domain("email", SqlType.Text, Default: "'n/a'", NotNull: true,
+            Checks: [new CheckConstraint("email_fmt", "VALUE ~ '@'")])),
+        new AlterDomainDefault("public", "email", "'n/a'", "'unknown'"),
+        new AlterDomainDefault("public", "email", "'unknown'", null),
+        new AlterDomainNotNull("public", "email", false),
+        new AddDomainCheck("public", "email", new CheckConstraint("email_len", "length(VALUE) > 3")),
+        new DropDomainCheck("public", "email", "email_fmt"),
+        // A base-type change recreates (drop + create, re-issuing the comment).
+        new RecreateDomain("public", new Domain("code", SqlType.VarChar(8), Comment: "a code")),
+        new RenameDomain("public", "old_code", "code"),
+        new SetDomainComment("public", "email", null, "an email"),
+        new DropDomain("public", "email"));
 
     // ── Sequences ──────────────────────────────────────────────────────────────
 

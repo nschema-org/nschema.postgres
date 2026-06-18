@@ -1,6 +1,8 @@
+using System.Text;
 using NSchema.Plan.Model;
 using NSchema.Plan.Model.Columns;
 using NSchema.Plan.Model.Constraints;
+using NSchema.Plan.Model.Domains;
 using NSchema.Plan.Model.Enums;
 using NSchema.Plan.Model.Indexes;
 using NSchema.Plan.Model.Routines;
@@ -10,6 +12,7 @@ using NSchema.Plan.Model.Tables;
 using NSchema.Plan.Model.Views;
 using NSchema.Schema.Model.Columns;
 using NSchema.Schema.Model.Constraints;
+using NSchema.Schema.Model.Domains;
 using NSchema.Schema.Model.Indexes;
 using NSchema.Schema.Model.Routines;
 using NSchema.Schema.Model.Sequences;
@@ -39,6 +42,7 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
         // runs it alone, and resumes — ordering relative to later statements that use the value is preserved.
         AddEnumValue x => [new SqlStatement(BuildAddEnumValue(x), RunOutsideTransaction: true)],
         RecreateRoutine x => BuildRecreateRoutine(RoutineKeyword(x.Routine.Kind), x.SchemaName, x.Routine.Name, x.Routine.Arguments, x.Routine.Definition, x.Routine.Comment),
+        RecreateDomain x => BuildRecreateDomain(x),
         _ => [new SqlStatement(GenerateSql(action))],
     };
 
@@ -91,6 +95,18 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
         SetEnumComment x => x.NewComment is null
             ? $"""COMMENT ON TYPE "{x.SchemaName}"."{x.EnumName}" IS NULL"""
             : $"""COMMENT ON TYPE "{x.SchemaName}"."{x.EnumName}" IS $comment${x.NewComment}$comment$""",
+        CreateDomain x => BuildCreateDomain(x.SchemaName, x.Domain),
+        DropDomain x => $"DROP DOMAIN \"{x.SchemaName}\".\"{x.DomainName}\"",
+        RenameDomain x => $"ALTER DOMAIN \"{x.SchemaName}\".\"{x.OldName}\" RENAME TO \"{x.NewName}\"",
+        AlterDomainDefault { NewDefault: null } x => $"""ALTER DOMAIN "{x.SchemaName}"."{x.DomainName}" DROP DEFAULT""",
+        AlterDomainDefault x => $"""ALTER DOMAIN "{x.SchemaName}"."{x.DomainName}" SET DEFAULT {x.NewDefault}""",
+        AlterDomainNotNull { NotNull: true } x => $"""ALTER DOMAIN "{x.SchemaName}"."{x.DomainName}" SET NOT NULL""",
+        AlterDomainNotNull x => $"""ALTER DOMAIN "{x.SchemaName}"."{x.DomainName}" DROP NOT NULL""",
+        AddDomainCheck x => $"""ALTER DOMAIN "{x.SchemaName}"."{x.DomainName}" ADD CONSTRAINT "{x.Check.Name}" CHECK ({x.Check.Expression})""",
+        DropDomainCheck x => $"ALTER DOMAIN \"{x.SchemaName}\".\"{x.DomainName}\" DROP CONSTRAINT \"{x.CheckName}\"",
+        SetDomainComment x => x.NewComment is null
+            ? $"""COMMENT ON DOMAIN "{x.SchemaName}"."{x.DomainName}" IS NULL"""
+            : $"""COMMENT ON DOMAIN "{x.SchemaName}"."{x.DomainName}" IS $comment${x.NewComment}$comment$""",
         CreateSequence x => BuildCreateSequence(x),
         DropSequence x => $"DROP SEQUENCE \"{x.SchemaName}\".\"{x.SequenceName}\"",
         RenameSequence x => $"ALTER SEQUENCE \"{x.SchemaName}\".\"{x.OldName}\" RENAME TO \"{x.NewName}\"",
@@ -398,6 +414,37 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
         _ => throw new NotSupportedException(
             $"""Cannot make existing column "{x.SchemaName}"."{x.TableName}"."{x.ColumnName}" generated in place; PostgreSQL has no ADD GENERATED — drop and re-add the column."""),
     };
+
+    // CREATE DOMAIN name AS type [DEFAULT expr] [NOT NULL] [CONSTRAINT n CHECK (expr)]…
+    private static string BuildCreateDomain(string schema, Domain domain)
+    {
+        var sb = new StringBuilder($"""CREATE DOMAIN "{schema}"."{domain.Name}" AS {ToPostgresType(domain.DataType)}""");
+        if (domain.Default is { } def)
+        {
+            sb.Append($" DEFAULT {def}");
+        }
+        if (domain.NotNull)
+        {
+            sb.Append(" NOT NULL");
+        }
+        foreach (var check in domain.Checks)
+        {
+            sb.Append($""" CONSTRAINT "{check.Name}" CHECK ({check.Expression})""");
+        }
+        return sb.ToString();
+    }
+
+    // A domain's base type cannot be altered in place (Postgres has no ALTER DOMAIN … TYPE), so a base-type change
+    // drops + recreates — re-issuing the comment the drop discarded. Fails loudly if a column still uses the domain.
+    private static IEnumerable<SqlStatement> BuildRecreateDomain(RecreateDomain x)
+    {
+        yield return new SqlStatement($"DROP DOMAIN \"{x.SchemaName}\".\"{x.Domain.Name}\"");
+        yield return new SqlStatement(BuildCreateDomain(x.SchemaName, x.Domain));
+        if (x.Domain.Comment is { } comment)
+        {
+            yield return new SqlStatement($"""COMMENT ON DOMAIN "{x.SchemaName}"."{x.Domain.Name}" IS $comment${comment}$comment$""");
+        }
+    }
 
     private static string ViewKind(bool isMaterialized) => isMaterialized ? "MATERIALIZED VIEW" : "VIEW";
 

@@ -2,6 +2,7 @@ using Npgsql;
 using NSchema.Plan.Model;
 using NSchema.Plan.Model.Columns;
 using NSchema.Plan.Model.Constraints;
+using NSchema.Plan.Model.Domains;
 using NSchema.Plan.Model.Enums;
 using NSchema.Plan.Model.Indexes;
 using NSchema.Plan.Model.Routines;
@@ -13,6 +14,7 @@ using NSchema.Postgres.Sql;
 using NSchema.Postgres.Tests.Fixtures;
 using NSchema.Schema.Model.Columns;
 using NSchema.Schema.Model.Constraints;
+using NSchema.Schema.Model.Domains;
 using NSchema.Schema.Model.Enums;
 using NSchema.Schema.Model.Indexes;
 using NSchema.Schema.Model.Routines;
@@ -759,6 +761,30 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         index.Name.ShouldBe("idx_totals_id");
         index.IsUnique.ShouldBeTrue();
         index.Columns.ShouldHaveSingleItem().Expression.ShouldBe("id");
+    }
+
+    // ── Domains ───────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task RoundTrip_Domain_IntrospectsWithAllFacets()
+    {
+        // Arrange — a domain over text with a default, NOT NULL, and a named check.
+        var domain = new Domain("us_postal", SqlType.Text, Default: "'00000'", NotNull: true,
+            Checks: [new CheckConstraint("us_postal_fmt", "VALUE ~ '^[0-9]{5}$'")]);
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new CreateDomain(_schema, domain)], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        var provider = new PostgresSchemaProvider(_dataSource);
+        var introspected = (await provider.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Domains.ShouldHaveSingleItem();
+        introspected.Name.ShouldBe("us_postal");
+        introspected.DataType.ShouldBe(SqlType.Text);
+        introspected.NotNull.ShouldBeTrue();
+        introspected.Default.ShouldNotBeNull();
+        introspected.Default!.ShouldContain("00000");
+        introspected.Checks.ShouldHaveSingleItem().Name.ShouldBe("us_postal_fmt");
     }
 
     // ── Deployment scripts ────────────────────────────────────────────────────

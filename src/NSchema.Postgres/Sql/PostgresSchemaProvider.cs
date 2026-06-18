@@ -5,6 +5,7 @@ using NSchema.Schema;
 using NSchema.Schema.Model;
 using NSchema.Schema.Model.Columns;
 using NSchema.Schema.Model.Constraints;
+using NSchema.Schema.Model.Domains;
 using NSchema.Schema.Model.Enums;
 using NSchema.Schema.Model.Indexes;
 using NSchema.Schema.Model.Routines;
@@ -49,6 +50,8 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         var enumComments = await QueryEnumComments(conn, schemas, cancellationToken);
         var sequences = await QuerySequences(conn, schemas, cancellationToken);
         var sequenceComments = await QuerySequenceComments(conn, schemas, cancellationToken);
+        var domains = await QueryDomains(conn, schemas, cancellationToken);
+        var domainChecks = await QueryDomainChecks(conn, schemas, cancellationToken);
         var functions = await QueryRoutines(conn, schemas, FunctionKind, cancellationToken);
         var functionComments = await QueryRoutineComments(conn, schemas, FunctionKind, cancellationToken);
         var procedures = await QueryRoutines(conn, schemas, ProcedureKind, cancellationToken);
@@ -59,6 +62,7 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
             schemaComments, tableComments, columnComments, indexComments, constraintComments,
             schemaGrants, tableGrants, views, viewComments, viewDependencies,
             enums, enumComments, sequences, sequenceComments,
+            domains, domainChecks,
             functions, functionComments, procedures, procedureComments
         );
     }
@@ -430,6 +434,94 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
                 ElementTexts: reader.GetFieldValue<string[]>(5),
                 IsExpressions: reader.GetFieldValue<bool[]>(6),
                 Operators: reader.GetFieldValue<string[]>(7)
+            ));
+        }
+
+        return rows;
+    }
+
+    private static async Task<List<DomainRow>> QueryDomains(NpgsqlConnection conn, string[]? schemas, CancellationToken ct)
+    {
+        var rows = new List<DomainRow>();
+        await using var cmd = conn.CreateCommand();
+        // The base type (and its length/precision/scale) come from information_schema.domains — the same shape a
+        // column reports — so MapSqlType can be reused. NOT NULL is not exposed there, so it is read from
+        // pg_type.typnotnull; the comment is on the domain's type entry.
+        cmd.CommandText = """
+            SELECT
+                d.domain_schema,
+                d.domain_name,
+                d.data_type,
+                d.udt_name,
+                d.character_maximum_length,
+                d.numeric_precision,
+                d.numeric_scale,
+                t.typnotnull AS not_null,
+                d.domain_default,
+                obj_description(t.oid, 'pg_type') AS comment
+            FROM information_schema.domains d
+            JOIN pg_namespace n ON n.nspname = d.domain_schema
+            JOIN pg_type      t ON t.typname = d.domain_name AND t.typnamespace = n.oid AND t.typtype = 'd'
+            WHERE (@schemas::text[] IS NULL OR d.domain_schema = ANY(@schemas))
+            AND d.domain_schema NOT IN ('pg_catalog', 'information_schema')
+            AND d.domain_schema NOT LIKE 'pg\_toast%' ESCAPE '\'
+            AND d.domain_schema NOT LIKE 'pg\_temp%' ESCAPE '\'
+            ORDER BY d.domain_schema, d.domain_name
+            """;
+        AddSchemasParameter(cmd, schemas);
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows.Add(new DomainRow(
+                Schema: reader.GetString(0),
+                Name: reader.GetString(1),
+                DataType: reader.GetString(2),
+                UdtName: reader.GetString(3),
+                MaxLength: reader.IsDBNull(4) ? null : reader.GetInt32(4),
+                Precision: reader.IsDBNull(5) ? null : reader.GetInt32(5),
+                Scale: reader.IsDBNull(6) ? null : reader.GetInt32(6),
+                NotNull: reader.GetBoolean(7),
+                Default: reader.IsDBNull(8) ? null : reader.GetString(8),
+                Comment: reader.IsDBNull(9) ? null : reader.GetString(9)
+            ));
+        }
+
+        return rows;
+    }
+
+    private static async Task<List<DomainCheckRow>> QueryDomainChecks(NpgsqlConnection conn, string[]? schemas, CancellationToken ct)
+    {
+        var rows = new List<DomainCheckRow>();
+        await using var cmd = conn.CreateCommand();
+        // Domain check constraints are pg_constraint rows attached to the type (contypid), not a table (conrelid).
+        // pg_get_constraintdef renders "CHECK (expr)" — strip the wrapper, as for table checks.
+        cmd.CommandText = """
+            SELECT
+                n.nspname AS schema_name,
+                t.typname AS domain_name,
+                c.conname AS check_name,
+                pg_get_constraintdef(c.oid) AS definition
+            FROM pg_constraint c
+            JOIN pg_type      t ON t.oid = c.contypid
+            JOIN pg_namespace n ON n.oid = t.typnamespace
+            WHERE c.contype = 'c' AND c.contypid <> 0
+            AND (@schemas::text[] IS NULL OR n.nspname = ANY(@schemas))
+            AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+            AND n.nspname NOT LIKE 'pg\_toast%' ESCAPE '\'
+            AND n.nspname NOT LIKE 'pg\_temp%' ESCAPE '\'
+            ORDER BY n.nspname, t.typname, c.conname
+            """;
+        AddSchemasParameter(cmd, schemas);
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows.Add(new DomainCheckRow(
+                Schema: reader.GetString(0),
+                DomainName: reader.GetString(1),
+                CheckName: reader.GetString(2),
+                Expression: StripCheckWrapper(reader.GetString(3))
             ));
         }
 
@@ -1116,6 +1208,8 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         Dictionary<(string, string), string?> enumComments,
         List<SequenceRow> sequences,
         Dictionary<(string, string), string?> sequenceComments,
+        List<DomainRow> domains,
+        List<DomainCheckRow> domainChecks,
         List<RoutineRow> functions,
         Dictionary<(string, string), string?> functionComments,
         List<RoutineRow> procedures,
@@ -1159,6 +1253,10 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
             .GroupBy(x => x.Schema)
             .ToDictionary(g => g.Key, g => g.Select(x => x.Routine).ToList());
 
+        var domainsBySchema = domains
+            .GroupBy(d => d.Schema)
+            .ToDictionary(g => g.Key, g => g.Select(d => MapDomain(d, domainChecks)).ToList());
+
         // Drive schema list from what actually exists in the database, not from what was requested.
         var existingSchemas = schemaComments.Keys
             .Union(bySchema.Keys)
@@ -1166,6 +1264,7 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
             .Union(enumsBySchema.Keys)
             .Union(sequencesBySchema.Keys)
             .Union(routinesBySchema.Keys)
+            .Union(domainsBySchema.Keys)
             .Union(schemaGrants.Select(g => g.SchemaName))
             .Distinct(StringComparer.OrdinalIgnoreCase);
 
@@ -1184,7 +1283,9 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
                     Sequences: sequencesBySchema.GetValueOrDefault(name, []),
                     DroppedSequences: [],
                     Routines: routinesBySchema.GetValueOrDefault(name, []),
-                    DroppedRoutines: []);
+                    DroppedRoutines: [],
+                    Domains: domainsBySchema.GetValueOrDefault(name, []),
+                    DroppedDomains: []);
             })
             .ToList();
 
@@ -1324,6 +1425,16 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
             Indexes: idxs,
             Grants: grants
         );
+    }
+
+    private static Domain MapDomain(DomainRow row, List<DomainCheckRow> allChecks)
+    {
+        var type = MapSqlType(row.DataType, row.UdtName, domainSchema: null, domainName: null, row.MaxLength, row.Precision, row.Scale);
+        var checks = allChecks
+            .Where(c => c.Schema == row.Schema && c.DomainName == row.Name)
+            .Select(c => new CheckConstraint(c.CheckName, c.Expression))
+            .ToList();
+        return new Domain(row.Name, type, row.Default, row.NotNull, checks, OldName: null, Comment: row.Comment);
     }
 
     private static ExclusionConstraint MapExclusionConstraint(ExclusionConstraintRow row, string? comment)
