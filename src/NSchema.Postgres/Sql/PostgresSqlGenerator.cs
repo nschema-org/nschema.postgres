@@ -5,6 +5,7 @@ using NSchema.Plan.Model.CompositeTypes;
 using NSchema.Plan.Model.Constraints;
 using NSchema.Plan.Model.Domains;
 using NSchema.Plan.Model.Enums;
+using NSchema.Plan.Model.Extensions;
 using NSchema.Plan.Model.Indexes;
 using NSchema.Plan.Model.Routines;
 using NSchema.Plan.Model.Schemas;
@@ -16,6 +17,7 @@ using NSchema.Schema.Model.Columns;
 using NSchema.Schema.Model.CompositeTypes;
 using NSchema.Schema.Model.Constraints;
 using NSchema.Schema.Model.Domains;
+using NSchema.Schema.Model.Extensions;
 using NSchema.Schema.Model.Indexes;
 using NSchema.Schema.Model.Routines;
 using NSchema.Schema.Model.Sequences;
@@ -158,6 +160,14 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
         SetConstraintComment x => x.NewComment is null
             ? $"""COMMENT ON CONSTRAINT "{x.ConstraintName}" ON "{x.SchemaName}"."{x.TableName}" IS NULL"""
             : $"""COMMENT ON CONSTRAINT "{x.ConstraintName}" ON "{x.SchemaName}"."{x.TableName}" IS $comment${x.NewComment}$comment$""",
+        CreateExtension x => BuildCreateExtension(x),
+        // A version change updates in place; with no target version, UPDATE moves to the default (latest) version.
+        AlterExtension { NewVersion: { } v } x => $"""ALTER EXTENSION "{x.ExtensionName}" UPDATE TO '{EscapeLiteral(v)}'""",
+        AlterExtension x => $"""ALTER EXTENSION "{x.ExtensionName}" UPDATE""",
+        DropExtension x => $"DROP EXTENSION \"{x.ExtensionName}\"",
+        SetExtensionComment x => x.NewComment is null
+            ? $"""COMMENT ON EXTENSION "{x.ExtensionName}" IS NULL"""
+            : $"""COMMENT ON EXTENSION "{x.ExtensionName}" IS $comment${x.NewComment}$comment$""",
         GrantSchemaUsage x => $"""GRANT USAGE ON SCHEMA "{x.SchemaName}" TO {x.Role}""",
         RevokeSchemaUsage x => $"""REVOKE USAGE ON SCHEMA "{x.SchemaName}" FROM {x.Role}""",
         GrantTablePrivileges x => $"""GRANT {PrivilegeList(x.Privileges)} ON TABLE "{x.SchemaName}"."{x.TableName}" TO {x.Role}""",
@@ -513,6 +523,12 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
             parts.Add("TRUNCATE");
         }
         return string.Join(" OR ", parts);
+    }
+
+    private static string BuildCreateExtension(CreateExtension x)
+    {
+        var sql = $"CREATE EXTENSION IF NOT EXISTS \"{x.Extension.Name}\"";
+        return x.Extension.Version is { } version ? $"{sql} VERSION '{EscapeLiteral(version)}'" : sql;
     }
 
     private static string ViewKind(bool isMaterialized) => isMaterialized ? "MATERIALIZED VIEW" : "VIEW";

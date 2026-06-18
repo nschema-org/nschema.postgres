@@ -5,6 +5,7 @@ using NSchema.Plan.Model.CompositeTypes;
 using NSchema.Plan.Model.Constraints;
 using NSchema.Plan.Model.Domains;
 using NSchema.Plan.Model.Enums;
+using NSchema.Plan.Model.Extensions;
 using NSchema.Plan.Model.Indexes;
 using NSchema.Plan.Model.Routines;
 using NSchema.Plan.Model.Schemas;
@@ -19,6 +20,7 @@ using NSchema.Schema.Model.CompositeTypes;
 using NSchema.Schema.Model.Constraints;
 using NSchema.Schema.Model.Domains;
 using NSchema.Schema.Model.Enums;
+using NSchema.Schema.Model.Extensions;
 using NSchema.Schema.Model.Indexes;
 using NSchema.Schema.Model.Routines;
 using NSchema.Schema.Model.Scripts;
@@ -794,6 +796,22 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         introspected.When.ShouldNotBeNull();
         introspected.When!.ShouldContain("active");
         introspected.FunctionArguments.ShouldBeNull();
+    }
+
+    // ── Extensions ────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task CreateExtension_ThenIntrospect_ReportsExtension()
+    {
+        // Act — create a contrib extension via the generator (extensions are database-global).
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new CreateExtension(new Extension("hstore"))], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert — it surfaces as a root-level extension with a version; plpgsql is excluded.
+        var provider = new PostgresSchemaProvider(_dataSource);
+        var schema = await provider.GetSchema([_schema], TestContext.Current.CancellationToken);
+        var hstore = schema.Extensions.Single(e => e.Name == "hstore");
+        hstore.Version.ShouldNotBeNull();
+        schema.Extensions.ShouldNotContain(e => e.Name == "plpgsql");
     }
 
     // ── Composite types ──────────────────────────────────────────────────────

@@ -8,6 +8,7 @@ using NSchema.Schema.Model.CompositeTypes;
 using NSchema.Schema.Model.Constraints;
 using NSchema.Schema.Model.Domains;
 using NSchema.Schema.Model.Enums;
+using NSchema.Schema.Model.Extensions;
 using NSchema.Schema.Model.Indexes;
 using NSchema.Schema.Model.Routines;
 using NSchema.Schema.Model.Schemas;
@@ -39,6 +40,7 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         var exclusionConstraints = await QueryExclusionConstraints(conn, schemas, cancellationToken);
         var indexes = await QueryIndexes(conn, schemas, cancellationToken);
         var triggers = await QueryTriggers(conn, schemas, cancellationToken);
+        var extensions = await QueryExtensions(conn, cancellationToken);
         var schemaComments = await QuerySchemaComments(conn, schemas, cancellationToken);
         var tableComments = await QueryTableComments(conn, schemas, cancellationToken);
         var columnComments = await QueryColumnComments(conn, schemas, cancellationToken);
@@ -68,7 +70,8 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
             schemaGrants, tableGrants, views, viewComments, viewDependencies,
             enums, enumComments, sequences, sequenceComments,
             domains, domainChecks, compositeTypes, compositeFields,
-            functions, functionComments, procedures, procedureComments
+            functions, functionComments, procedures, procedureComments,
+            extensions
         );
     }
 
@@ -608,6 +611,34 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
                 MaxLength: reader.IsDBNull(6) ? null : reader.GetInt32(6),
                 Precision: reader.IsDBNull(7) ? null : reader.GetInt32(7),
                 Scale: reader.IsDBNull(8) ? null : reader.GetInt32(8)
+            ));
+        }
+
+        return rows;
+    }
+
+    private static async Task<List<ExtensionRow>> QueryExtensions(NpgsqlConnection conn, CancellationToken ct)
+    {
+        var rows = new List<ExtensionRow>();
+        await using var cmd = conn.CreateCommand();
+        // Extensions are database-global (not schema-scoped), so they are not filtered by the schema list. plpgsql
+        // is the always-installed procedural language and never part of a declared schema, so it is excluded.
+        cmd.CommandText = """
+            SELECT e.extname AS name,
+                   e.extversion AS version,
+                   obj_description(e.oid, 'pg_extension') AS comment
+            FROM pg_extension e
+            WHERE e.extname <> 'plpgsql'
+            ORDER BY e.extname
+            """;
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows.Add(new ExtensionRow(
+                Name: reader.GetString(0),
+                Version: reader.IsDBNull(1) ? null : reader.GetString(1),
+                Comment: reader.IsDBNull(2) ? null : reader.GetString(2)
             ));
         }
 
@@ -1360,7 +1391,8 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         List<RoutineRow> functions,
         Dictionary<(string, string), string?> functionComments,
         List<RoutineRow> procedures,
-        Dictionary<(string, string), string?> procedureComments
+        Dictionary<(string, string), string?> procedureComments,
+        List<ExtensionRow> extensions
     )
     {
         var bySchema = tables
@@ -1443,7 +1475,8 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
             })
             .ToList();
 
-        return new DatabaseSchema(dbSchemas, []);
+        var dbExtensions = extensions.Select(e => new Extension(e.Name, e.Version, e.Comment)).ToList();
+        return new DatabaseSchema(dbSchemas, [], dbExtensions, []);
     }
 
     // Postgres engine defaults are folded to null so a bare "CREATE SEQUENCE" round-trips to an all-null

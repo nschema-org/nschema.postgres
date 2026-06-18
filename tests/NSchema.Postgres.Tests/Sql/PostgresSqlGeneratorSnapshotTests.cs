@@ -4,6 +4,7 @@ using NSchema.Plan.Model.CompositeTypes;
 using NSchema.Plan.Model.Constraints;
 using NSchema.Plan.Model.Domains;
 using NSchema.Plan.Model.Enums;
+using NSchema.Plan.Model.Extensions;
 using NSchema.Plan.Model.Indexes;
 using NSchema.Plan.Model.Routines;
 using NSchema.Plan.Model.Schemas;
@@ -17,6 +18,7 @@ using NSchema.Schema.Model.CompositeTypes;
 using NSchema.Schema.Model.Constraints;
 using NSchema.Schema.Model.Domains;
 using NSchema.Schema.Model.Enums;
+using NSchema.Schema.Model.Extensions;
 using NSchema.Schema.Model.Indexes;
 using NSchema.Schema.Model.Routines;
 using NSchema.Schema.Model.Scripts;
@@ -234,6 +236,18 @@ public sealed class PostgresSqlGeneratorSnapshotTests
         new SetSequenceComment("public", "invoice_id", null, "Invoice numbers"),
         new SetSequenceComment("public", "invoice_id", "Invoice numbers", null),
         new DropSequence("public", "invoice_id"));
+
+    // ── Extensions ────────────────────────────────────────────────────────────
+
+    [Fact]
+    public Task ExtensionOperations() => VerifyPlan(
+        new CreateExtension(new Extension("citext")),
+        new CreateExtension(new Extension("postgis", Version: "3.4")),
+        // A hyphenated name must be quoted.
+        new CreateExtension(new Extension("uuid-ossp")),
+        new AlterExtension("postgis", "3.4", "3.5"),
+        new SetExtensionComment("citext", null, "case-insensitive text"),
+        new DropExtension("postgis"));
 
     // ── Functions ─────────────────────────────────────────────────────────────
 

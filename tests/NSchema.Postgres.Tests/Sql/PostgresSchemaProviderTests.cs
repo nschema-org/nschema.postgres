@@ -1027,4 +1027,19 @@ public sealed class PostgresSchemaProviderTests(PostgresContainerFixture fixture
         // Assert
         schema.Routines.ShouldBeEmpty();
     }
+
+    [Fact]
+    public async Task GetSchema_Extensions_AreReportedAtRootWithVersion()
+    {
+        // Arrange — the fixture enables citext database-wide; extensions are global, so a schema-scoped read still
+        // surfaces them at the root. plpgsql (the always-present default) is excluded.
+
+        // Act
+        var schema = await _sut.GetSchema([_schema], TestContext.Current.CancellationToken);
+
+        // Assert
+        var citext = schema.Extensions.Single(e => e.Name == "citext");
+        citext.Version.ShouldNotBeNull();
+        schema.Extensions.ShouldNotContain(e => e.Name == "plpgsql");
+    }
 }
