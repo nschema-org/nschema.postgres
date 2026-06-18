@@ -7,8 +7,6 @@ namespace NSchema.Postgres.Sql;
 
 internal sealed class PostgresSqlGenerator : ISqlGenerator
 {
-    public const string DialectName = "postgres";
-
     public SqlPlan Generate(MigrationPlan plan)
     {
         var preDeploymentStatements = plan.PreDeploymentScripts.Select(s => new SqlStatement(s.Sql, s.RunOutsideTransaction));
