@@ -1,8 +1,25 @@
 using Npgsql;
 using NSchema.Plan.Model;
+using NSchema.Plan.Model.Columns;
+using NSchema.Plan.Model.Constraints;
+using NSchema.Plan.Model.Enums;
+using NSchema.Plan.Model.Indexes;
+using NSchema.Plan.Model.Routines;
+using NSchema.Plan.Model.Schemas;
+using NSchema.Plan.Model.Sequence;
+using NSchema.Plan.Model.Tables;
+using NSchema.Plan.Model.Views;
 using NSchema.Postgres.Sql;
 using NSchema.Postgres.Tests.Fixtures;
-using NSchema.Schema.Model;
+using NSchema.Schema.Model.Columns;
+using NSchema.Schema.Model.Constraints;
+using NSchema.Schema.Model.Enums;
+using NSchema.Schema.Model.Indexes;
+using NSchema.Schema.Model.Routines;
+using NSchema.Schema.Model.Scripts;
+using NSchema.Schema.Model.Sequences;
+using NSchema.Schema.Model.Tables;
+using NSchema.Schema.Model.Views;
 using NSchema.Sql.Model;
 
 namespace NSchema.Postgres.Tests.Sql;
@@ -847,12 +864,12 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
     public async Task CreateFunction_CreatesFunctionInDatabase()
     {
         // Arrange
-        var function = new Function("add_numbers", "a integer, b integer",
+        var function = new Routine("add_numbers", RoutineKind.Function, "a integer, b integer",
             "RETURNS integer LANGUAGE sql AS $$ SELECT a + b $$");
 
         // Act
         await _executor.Execute(_generator.Generate(new MigrationPlan(
-            [new CreateFunction(_schema, function)], [], [])), TestContext.Current.CancellationToken);
+            [new CreateRoutine(_schema, function)], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         (await ScalarString($"""SELECT "{_schema}".add_numbers(2, 3)::text""")).ShouldBe("5");
@@ -863,11 +880,11 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
     {
         // Arrange — CreateFunction serves both add and definition-only modify; the second create must replace.
         await Exec($"""CREATE FUNCTION "{_schema}".answer() RETURNS integer LANGUAGE sql AS $$ SELECT 1 $$""");
-        var replacement = new Function("answer", "", "RETURNS integer LANGUAGE sql AS $$ SELECT 42 $$");
+        var replacement = new Routine("answer", RoutineKind.Function, "", "RETURNS integer LANGUAGE sql AS $$ SELECT 42 $$");
 
         // Act
         await _executor.Execute(_generator.Generate(new MigrationPlan(
-            [new CreateFunction(_schema, replacement)], [], [])), TestContext.Current.CancellationToken);
+            [new CreateRoutine(_schema, replacement)], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         (await ScalarString($"""SELECT "{_schema}".answer()::text""")).ShouldBe("42");
@@ -882,12 +899,12 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
             CREATE FUNCTION "{_schema}".add_numbers(a integer, b integer) RETURNS integer LANGUAGE sql AS $$ SELECT a + b $$;
             COMMENT ON FUNCTION "{_schema}".add_numbers IS 'Adds numbers';
             """);
-        var desired = new Function("add_numbers", "a integer, b integer, c integer",
+        var desired = new Routine("add_numbers", RoutineKind.Function, "a integer, b integer, c integer",
             "RETURNS integer LANGUAGE sql AS $$ SELECT a + b + c $$", Comment: "Adds numbers");
 
         // Act
         await _executor.Execute(_generator.Generate(new MigrationPlan(
-            [new RecreateFunction(_schema, desired)], [], [])), TestContext.Current.CancellationToken);
+            [new RecreateRoutine(_schema, desired)], [], [])), TestContext.Current.CancellationToken);
 
         // Assert — exactly one routine remains, under the new signature, with the comment restored.
         var count = await ScalarString($"""
@@ -907,7 +924,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
 
         // Act
         await _executor.Execute(_generator.Generate(new MigrationPlan(
-            [new RenameFunction(_schema, "old_answer", "answer")], [], [])), TestContext.Current.CancellationToken);
+            [new RenameRoutine(_schema, "old_answer", "answer", RoutineKind.Function)], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         (await ScalarString($"""SELECT "{_schema}".answer()::text""")).ShouldBe("42");
@@ -922,12 +939,12 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
 
         // Act + Assert — set...
         await _executor.Execute(_generator.Generate(new MigrationPlan(
-            [new SetFunctionComment(_schema, "answer", null, "the answer")], [], [])), TestContext.Current.CancellationToken);
+            [new SetRoutineComment(_schema, "answer", null, "the answer", RoutineKind.Function)], [], [])), TestContext.Current.CancellationToken);
         (await ScalarString(commentSql)).ShouldBe("the answer");
 
         // ...and clear.
         await _executor.Execute(_generator.Generate(new MigrationPlan(
-            [new SetFunctionComment(_schema, "answer", "the answer", null)], [], [])), TestContext.Current.CancellationToken);
+            [new SetRoutineComment(_schema, "answer", "the answer", null, RoutineKind.Function)], [], [])), TestContext.Current.CancellationToken);
         (await ScalarBool($"SELECT ({commentSql}) IS NULL")).ShouldBeTrue();
     }
 
@@ -939,7 +956,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
 
         // Act
         await _executor.Execute(_generator.Generate(new MigrationPlan(
-            [new DropFunction(_schema, "answer")], [], [])), TestContext.Current.CancellationToken);
+            [new DropRoutine(_schema, "answer", RoutineKind.Function)], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         var exists = await ScalarBool($"""
@@ -956,12 +973,12 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
     {
         // Arrange
         await Exec($"""CREATE TABLE "{_schema}".audit (entry text)""");
-        var procedure = new Procedure("log_entry", "message text",
+        var procedure = new Routine("log_entry", RoutineKind.Procedure, "message text",
             $"""LANGUAGE sql AS $$ INSERT INTO "{_schema}".audit (entry) VALUES (message) $$""");
 
         // Act
         await _executor.Execute(_generator.Generate(new MigrationPlan(
-            [new CreateProcedure(_schema, procedure)], [], [])), TestContext.Current.CancellationToken);
+            [new CreateRoutine(_schema, procedure)], [], [])), TestContext.Current.CancellationToken);
 
         // Assert — the procedure exists and is callable.
         await Exec($"""CALL "{_schema}".log_entry('hello')""");
@@ -976,12 +993,12 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
             CREATE PROCEDURE "{_schema}".noop(a integer) LANGUAGE sql AS $$ SELECT 1 $$;
             COMMENT ON PROCEDURE "{_schema}".noop IS 'does nothing';
             """);
-        var desired = new Procedure("noop", "a integer, b integer",
+        var desired = new Routine("noop", RoutineKind.Procedure, "a integer, b integer",
             "LANGUAGE sql AS $$ SELECT 1 $$", Comment: "does nothing");
 
         // Act
         await _executor.Execute(_generator.Generate(new MigrationPlan(
-            [new RecreateProcedure(_schema, desired)], [], [])), TestContext.Current.CancellationToken);
+            [new RecreateRoutine(_schema, desired)], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         var count = await ScalarString($"""
@@ -1001,7 +1018,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
 
         // Act
         await _executor.Execute(_generator.Generate(new MigrationPlan(
-            [new RenameProcedure(_schema, "old_noop", "noop")], [], [])), TestContext.Current.CancellationToken);
+            [new RenameRoutine(_schema, "old_noop", "noop", RoutineKind.Procedure)], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         await Exec($"""CALL "{_schema}".noop()""");
@@ -1016,12 +1033,12 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
 
         // Act + Assert — set...
         await _executor.Execute(_generator.Generate(new MigrationPlan(
-            [new SetProcedureComment(_schema, "noop", null, "does nothing")], [], [])), TestContext.Current.CancellationToken);
+            [new SetRoutineComment(_schema, "noop", null, "does nothing", RoutineKind.Procedure)], [], [])), TestContext.Current.CancellationToken);
         (await ScalarString(commentSql)).ShouldBe("does nothing");
 
         // ...and clear.
         await _executor.Execute(_generator.Generate(new MigrationPlan(
-            [new SetProcedureComment(_schema, "noop", "does nothing", null)], [], [])), TestContext.Current.CancellationToken);
+            [new SetRoutineComment(_schema, "noop", "does nothing", null, RoutineKind.Procedure)], [], [])), TestContext.Current.CancellationToken);
         (await ScalarBool($"SELECT ({commentSql}) IS NULL")).ShouldBeTrue();
     }
 
@@ -1033,7 +1050,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
 
         // Act
         await _executor.Execute(_generator.Generate(new MigrationPlan(
-            [new DropProcedure(_schema, "noop")], [], [])), TestContext.Current.CancellationToken);
+            [new DropRoutine(_schema, "noop", RoutineKind.Procedure)], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         var exists = await ScalarBool($"""
@@ -1103,17 +1120,17 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         // Arrange — the argument list is the recreate trigger, so what was applied must read back verbatim.
         // (The definition reads back in the DB's canonical form — $function$ quoting, qualified names — which the
         // core reconciles by storing the DB-reported form, as with view bodies.)
-        var function = new Function("add_numbers", "a integer, b integer",
+        var function = new Routine("add_numbers", RoutineKind.Function, "a integer, b integer",
             "RETURNS integer LANGUAGE sql AS $$ SELECT a + b $$");
 
         // Act
         await _executor.Execute(_generator.Generate(new MigrationPlan(
-            [new CreateFunction(_schema, function)], [], [])), TestContext.Current.CancellationToken);
+            [new CreateRoutine(_schema, function)], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         var provider = new PostgresSchemaProvider(_dataSource);
         var introspected = (await provider.GetSchema([_schema], TestContext.Current.CancellationToken))
-            .Schemas[0].Functions.ShouldHaveSingleItem();
+            .Schemas[0].Routines.ShouldHaveSingleItem();
         introspected.Name.ShouldBe("add_numbers");
         introspected.Arguments.ShouldBe("a integer, b integer");
         introspected.Definition.ShouldContain("SELECT a + b");

@@ -1,5 +1,17 @@
 using NSchema.Plan.Model;
-using NSchema.Schema.Model;
+using NSchema.Plan.Model.Columns;
+using NSchema.Plan.Model.Constraints;
+using NSchema.Plan.Model.Enums;
+using NSchema.Plan.Model.Indexes;
+using NSchema.Plan.Model.Routines;
+using NSchema.Plan.Model.Schemas;
+using NSchema.Plan.Model.Sequence;
+using NSchema.Plan.Model.Tables;
+using NSchema.Plan.Model.Views;
+using NSchema.Schema.Model.Columns;
+using NSchema.Schema.Model.Routines;
+using NSchema.Schema.Model.Sequences;
+using NSchema.Schema.Model.Tables;
 using NSchema.Sql;
 using NSchema.Sql.Model;
 
@@ -24,8 +36,7 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
         // the statement is carved out of the surrounding transaction. The executor commits the pending segment,
         // runs it alone, and resumes — ordering relative to later statements that use the value is preserved.
         AddEnumValue x => [new SqlStatement(BuildAddEnumValue(x), RunOutsideTransaction: true)],
-        RecreateFunction x => BuildRecreateRoutine("FUNCTION", x.SchemaName, x.Function.Name, x.Function.Arguments, x.Function.Definition, x.Function.Comment),
-        RecreateProcedure x => BuildRecreateRoutine("PROCEDURE", x.SchemaName, x.Procedure.Name, x.Procedure.Arguments, x.Procedure.Definition, x.Procedure.Comment),
+        RecreateRoutine x => BuildRecreateRoutine(RoutineKeyword(x.Routine.Kind), x.SchemaName, x.Routine.Name, x.Routine.Arguments, x.Routine.Definition, x.Routine.Comment),
         _ => [new SqlStatement(GenerateSql(action))],
     };
 
@@ -78,21 +89,17 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
         SetSequenceComment x => x.NewComment is null
             ? $"""COMMENT ON SEQUENCE "{x.SchemaName}"."{x.SequenceName}" IS NULL"""
             : $"""COMMENT ON SEQUENCE "{x.SchemaName}"."{x.SequenceName}" IS $comment${x.NewComment}$comment$""",
-        // A routine Add and a definition-only Modify both arrive as Create; CREATE OR REPLACE serves both. The model
-        // has no overloading (one routine per name), so drops, renames and comments omit the signature — Postgres
-        // resolves the bare name, and rejects it loudly if an out-of-model overload makes it ambiguous.
-        CreateFunction x => $"""CREATE OR REPLACE FUNCTION "{x.SchemaName}"."{x.Function.Name}"({x.Function.Arguments}) {x.Function.Definition}""",
-        DropFunction x => $"DROP FUNCTION \"{x.SchemaName}\".\"{x.FunctionName}\"",
-        RenameFunction x => $"ALTER FUNCTION \"{x.SchemaName}\".\"{x.OldName}\" RENAME TO \"{x.NewName}\"",
-        SetFunctionComment x => x.NewComment is null
-            ? $"""COMMENT ON FUNCTION "{x.SchemaName}"."{x.FunctionName}" IS NULL"""
-            : $"""COMMENT ON FUNCTION "{x.SchemaName}"."{x.FunctionName}" IS $comment${x.NewComment}$comment$""",
-        CreateProcedure x => $"""CREATE OR REPLACE PROCEDURE "{x.SchemaName}"."{x.Procedure.Name}"({x.Procedure.Arguments}) {x.Procedure.Definition}""",
-        DropProcedure x => $"DROP PROCEDURE \"{x.SchemaName}\".\"{x.ProcedureName}\"",
-        RenameProcedure x => $"ALTER PROCEDURE \"{x.SchemaName}\".\"{x.OldName}\" RENAME TO \"{x.NewName}\"",
-        SetProcedureComment x => x.NewComment is null
-            ? $"""COMMENT ON PROCEDURE "{x.SchemaName}"."{x.ProcedureName}" IS NULL"""
-            : $"""COMMENT ON PROCEDURE "{x.SchemaName}"."{x.ProcedureName}" IS $comment${x.NewComment}$comment$""",
+        // A routine Add and a definition-only Modify both arrive as CreateRoutine; CREATE OR REPLACE serves both.
+        // Functions and procedures are one model distinguished by Kind, so a single set of actions carries the
+        // keyword. The model has no overloading (one routine per name), so drops, renames and comments omit the
+        // signature — Postgres resolves the bare name, and rejects it loudly if an out-of-model overload makes it
+        // ambiguous.
+        CreateRoutine x => $"""CREATE OR REPLACE {RoutineKeyword(x.Routine.Kind)} "{x.SchemaName}"."{x.Routine.Name}"({x.Routine.Arguments}) {x.Routine.Definition}""",
+        DropRoutine x => $"DROP {RoutineKeyword(x.Kind)} \"{x.SchemaName}\".\"{x.RoutineName}\"",
+        RenameRoutine x => $"ALTER {RoutineKeyword(x.Kind)} \"{x.SchemaName}\".\"{x.OldName}\" RENAME TO \"{x.NewName}\"",
+        SetRoutineComment x => x.NewComment is null
+            ? $"""COMMENT ON {RoutineKeyword(x.Kind)} "{x.SchemaName}"."{x.RoutineName}" IS NULL"""
+            : $"""COMMENT ON {RoutineKeyword(x.Kind)} "{x.SchemaName}"."{x.RoutineName}" IS $comment${x.NewComment}$comment$""",
         SetSchemaComment x => x.NewComment is null
             ? $"""COMMENT ON SCHEMA "{x.SchemaName}" IS NULL"""
             : $"""COMMENT ON SCHEMA "{x.SchemaName}" IS $comment${x.NewComment}$comment$""",
@@ -143,7 +150,10 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
 
     private static string BuildCreateIndex(CreateIndex x)
     {
-        var sql = $"""CREATE {(x.Index.IsUnique ? "UNIQUE " : "")}INDEX "{x.Index.Name}" ON "{x.SchemaName}"."{x.TableName}" ({ColList(x.Index.ColumnNames)})""";
+        // Baseline: render plain column keys exactly as before. Access method, INCLUDE, expression keys, and
+        // per-key ordering carried on the richer index model are handled by the index-depth feature work.
+        var keys = ColList(x.Index.Columns.Select(c => c.Expression).ToList());
+        var sql = $"""CREATE {(x.Index.IsUnique ? "UNIQUE " : "")}INDEX "{x.Index.Name}" ON "{x.SchemaName}"."{x.TableName}" ({keys})""";
         return x.Index.Predicate is { } pred ? $"{sql} WHERE {pred}" : sql;
     }
 
@@ -327,6 +337,8 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
             yield return new SqlStatement($"""COMMENT ON {kind} "{schemaName}"."{name}" IS $comment${comment}$comment$""");
         }
     }
+
+    private static string RoutineKeyword(RoutineKind kind) => kind == RoutineKind.Procedure ? "PROCEDURE" : "FUNCTION";
 
     private static long DefaultStart(SequenceOptions options) =>
         (options.IncrementBy ?? 1) > 0 ? options.MinValue ?? 1 : options.MaxValue ?? -1;

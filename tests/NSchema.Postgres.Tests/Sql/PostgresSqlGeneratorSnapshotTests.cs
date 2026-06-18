@@ -1,6 +1,21 @@
 using NSchema.Plan.Model;
+using NSchema.Plan.Model.Columns;
+using NSchema.Plan.Model.Enums;
+using NSchema.Plan.Model.Indexes;
+using NSchema.Plan.Model.Routines;
+using NSchema.Plan.Model.Schemas;
+using NSchema.Plan.Model.Sequence;
+using NSchema.Plan.Model.Tables;
+using NSchema.Plan.Model.Views;
 using NSchema.Postgres.Sql;
-using NSchema.Schema.Model;
+using NSchema.Schema.Model.Columns;
+using NSchema.Schema.Model.Enums;
+using NSchema.Schema.Model.Indexes;
+using NSchema.Schema.Model.Routines;
+using NSchema.Schema.Model.Scripts;
+using NSchema.Schema.Model.Sequences;
+using NSchema.Schema.Model.Tables;
+using NSchema.Schema.Model.Views;
 using NSchema.Sql;
 
 namespace NSchema.Postgres.Tests.Sql;
@@ -136,30 +151,30 @@ public sealed class PostgresSqlGeneratorSnapshotTests
 
     [Fact]
     public Task FunctionOperations() => VerifyPlan(
-        new CreateFunction("public", new Function("active_user_count", "",
+        new CreateRoutine("public", new Routine("active_user_count", RoutineKind.Function, "",
             "RETURNS integer LANGUAGE sql AS $$ SELECT count(*) FROM public.users WHERE active $$")),
-        new RenameFunction("public", "user_count", "active_user_count"),
+        new RenameRoutine("public", "user_count", "active_user_count", RoutineKind.Function),
         // A signature change: drop + recreate, re-issuing the comment the drop discarded.
-        new RecreateFunction("public", new Function("add_numbers", "a integer, b integer, c integer DEFAULT 0",
+        new RecreateRoutine("public", new Routine("add_numbers", RoutineKind.Function, "a integer, b integer, c integer DEFAULT 0",
             "RETURNS integer LANGUAGE sql AS $$ SELECT a + b + c $$", Comment: "Adds numbers")),
-        new RecreateFunction("public", new Function("subtract_numbers", "a integer, b integer",
+        new RecreateRoutine("public", new Routine("subtract_numbers", RoutineKind.Function, "a integer, b integer",
             "RETURNS integer LANGUAGE sql AS $$ SELECT a - b $$")),
-        new SetFunctionComment("public", "active_user_count", null, "Count of active users"),
-        new SetFunctionComment("public", "active_user_count", "Count of active users", null),
-        new DropFunction("public", "active_user_count"));
+        new SetRoutineComment("public", "active_user_count", null, "Count of active users", RoutineKind.Function),
+        new SetRoutineComment("public", "active_user_count", "Count of active users", null, RoutineKind.Function),
+        new DropRoutine("public", "active_user_count", RoutineKind.Function));
 
     // ── Procedures ────────────────────────────────────────────────────────────
 
     [Fact]
     public Task ProcedureOperations() => VerifyPlan(
-        new CreateProcedure("public", new Procedure("archive_users", "cutoff date",
+        new CreateRoutine("public", new Routine("archive_users", RoutineKind.Procedure, "cutoff date",
             "LANGUAGE sql AS $$ DELETE FROM public.users WHERE created_at < cutoff $$")),
-        new RenameProcedure("public", "purge_users", "archive_users"),
-        new RecreateProcedure("public", new Procedure("archive_users", "cutoff timestamptz",
+        new RenameRoutine("public", "purge_users", "archive_users", RoutineKind.Procedure),
+        new RecreateRoutine("public", new Routine("archive_users", RoutineKind.Procedure, "cutoff timestamptz",
             "LANGUAGE sql AS $$ DELETE FROM public.users WHERE created_at < cutoff $$", Comment: "Archives stale users")),
-        new SetProcedureComment("public", "archive_users", null, "Archive job"),
-        new SetProcedureComment("public", "archive_users", "Archive job", null),
-        new DropProcedure("public", "archive_users"));
+        new SetRoutineComment("public", "archive_users", null, "Archive job", RoutineKind.Procedure),
+        new SetRoutineComment("public", "archive_users", "Archive job", null, RoutineKind.Procedure),
+        new DropRoutine("public", "archive_users", RoutineKind.Procedure));
 
     // ── Comments ────────────────────────────────────────────────────────────────
 

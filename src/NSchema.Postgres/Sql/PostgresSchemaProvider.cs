@@ -3,6 +3,15 @@ using NpgsqlTypes;
 using NSchema.Postgres.Models;
 using NSchema.Schema;
 using NSchema.Schema.Model;
+using NSchema.Schema.Model.Columns;
+using NSchema.Schema.Model.Constraints;
+using NSchema.Schema.Model.Enums;
+using NSchema.Schema.Model.Indexes;
+using NSchema.Schema.Model.Routines;
+using NSchema.Schema.Model.Schemas;
+using NSchema.Schema.Model.Sequences;
+using NSchema.Schema.Model.Tables;
+using NSchema.Schema.Model.Views;
 
 namespace NSchema.Postgres.Sql;
 
@@ -1063,19 +1072,16 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
                 g => g.Select(s => new Sequence(s.Name, NormalizeSequenceOptions(s), OldName: null,
                     Comment: sequenceComments.GetValueOrDefault((s.Schema, s.Name)))).ToList());
 
-        var functionsBySchema = functions
-            .GroupBy(f => f.Schema)
-            .ToDictionary(
-                g => g.Key,
-                g => g.Select(f => new Function(f.Name, f.Arguments, f.Definition, OldName: null,
-                    Comment: functionComments.GetValueOrDefault((f.Schema, f.Name)))).ToList());
-
-        var proceduresBySchema = procedures
-            .GroupBy(p => p.Schema)
-            .ToDictionary(
-                g => g.Key,
-                g => g.Select(p => new Procedure(p.Name, p.Arguments, p.Definition, OldName: null,
-                    Comment: procedureComments.GetValueOrDefault((p.Schema, p.Name)))).ToList());
+        // Functions and procedures are one model (Routine) distinguished by Kind, sharing a single name space, so
+        // the two query results merge into one routine list per schema.
+        var routinesBySchema = functions
+            .Select(f => (f.Schema, Routine: new Routine(f.Name, RoutineKind.Function, f.Arguments, f.Definition,
+                OldName: null, Comment: functionComments.GetValueOrDefault((f.Schema, f.Name)))))
+            .Concat(procedures
+                .Select(p => (p.Schema, Routine: new Routine(p.Name, RoutineKind.Procedure, p.Arguments, p.Definition,
+                    OldName: null, Comment: procedureComments.GetValueOrDefault((p.Schema, p.Name))))))
+            .GroupBy(x => x.Schema)
+            .ToDictionary(g => g.Key, g => g.Select(x => x.Routine).ToList());
 
         // Drive schema list from what actually exists in the database, not from what was requested.
         var existingSchemas = schemaComments.Keys
@@ -1083,8 +1089,7 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
             .Union(viewsBySchema.Keys)
             .Union(enumsBySchema.Keys)
             .Union(sequencesBySchema.Keys)
-            .Union(functionsBySchema.Keys)
-            .Union(proceduresBySchema.Keys)
+            .Union(routinesBySchema.Keys)
             .Union(schemaGrants.Select(g => g.SchemaName))
             .Distinct(StringComparer.OrdinalIgnoreCase);
 
@@ -1102,10 +1107,8 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
                     DroppedEnums: [],
                     Sequences: sequencesBySchema.GetValueOrDefault(name, []),
                     DroppedSequences: [],
-                    Functions: functionsBySchema.GetValueOrDefault(name, []),
-                    DroppedFunctions: [],
-                    Procedures: proceduresBySchema.GetValueOrDefault(name, []),
-                    DroppedProcedures: []);
+                    Routines: routinesBySchema.GetValueOrDefault(name, []),
+                    DroppedRoutines: []);
             })
             .ToList();
 
@@ -1202,7 +1205,7 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         var idxs = allIndexes
             .Where(i => i.SchemaName == tableRow.Schema && i.TableName == tableRow.Name)
             .Select(i => new TableIndex(
-                i.IndexName, i.ColumnNames, i.IsUnique,
+                i.IndexName, i.ColumnNames.Select(c => new IndexColumn(c)).ToList(), i.IsUnique,
                 indexComments.GetValueOrDefault((tableRow.Schema, i.IndexName)),
                 i.Predicate))
             .ToList();
