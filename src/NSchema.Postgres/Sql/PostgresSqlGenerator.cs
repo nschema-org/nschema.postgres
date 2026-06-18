@@ -9,6 +9,7 @@ using NSchema.Plan.Model.Sequence;
 using NSchema.Plan.Model.Tables;
 using NSchema.Plan.Model.Views;
 using NSchema.Schema.Model.Columns;
+using NSchema.Schema.Model.Constraints;
 using NSchema.Schema.Model.Indexes;
 using NSchema.Schema.Model.Routines;
 using NSchema.Schema.Model.Sequences;
@@ -67,6 +68,8 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
         DropUniqueConstraint x => $"ALTER TABLE \"{x.SchemaName}\".\"{x.TableName}\" DROP CONSTRAINT \"{x.ConstraintName}\"",
         AddCheckConstraint x => $"""ALTER TABLE "{x.SchemaName}"."{x.TableName}" ADD CONSTRAINT "{x.CheckConstraint.Name}" CHECK ({x.CheckConstraint.Expression})""",
         DropCheckConstraint x => $"ALTER TABLE \"{x.SchemaName}\".\"{x.TableName}\" DROP CONSTRAINT \"{x.ConstraintName}\"",
+        AddExclusionConstraint x => BuildAddExclusionConstraint(x),
+        DropExclusionConstraint x => $"ALTER TABLE \"{x.SchemaName}\".\"{x.TableName}\" DROP CONSTRAINT \"{x.ConstraintName}\"",
         CreateIndex x => BuildCreateIndex(x),
         DropIndex x => $"DROP INDEX \"{x.SchemaName}\".\"{x.IndexName}\"",
         // A view Add and a body Modify both arrive as CreateView; CREATE OR REPLACE serves both. An incompatible
@@ -140,6 +143,23 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
                 {string.Join(",\n    ", parts)}
             )
             """;
+    }
+
+    private static string BuildAddExclusionConstraint(AddExclusionConstraint x)
+    {
+        var ex = x.ExclusionConstraint;
+        var method = ex.Method is { } m ? $" USING {m}" : "";
+        var elements = string.Join(", ", ex.Elements.Select(ExclusionElementText));
+        var where = ex.Predicate is { } p ? $" WHERE ({p})" : "";
+        return $"""ALTER TABLE "{x.SchemaName}"."{x.TableName}" ADD CONSTRAINT "{ex.Name}" EXCLUDE{method} ({elements}){where}""";
+    }
+
+    // A plain column element is quoted; an expression element is parenthesised and verbatim. The operator follows
+    // WITH (e.g. =, &&) and needs no quoting.
+    private static string ExclusionElementText(ExclusionElement element)
+    {
+        var target = element.IsExpression ? $"({element.Expression})" : $"\"{element.Expression}\"";
+        return $"{target} WITH {element.Operator}";
     }
 
     private static string BuildAddForeignKey(AddForeignKey x)

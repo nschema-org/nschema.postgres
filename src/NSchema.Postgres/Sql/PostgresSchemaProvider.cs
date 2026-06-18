@@ -33,6 +33,7 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         var foreignKeys = await QueryForeignKeys(conn, schemas, cancellationToken);
         var uniqueConstraints = await QueryUniqueConstraints(conn, schemas, cancellationToken);
         var checkConstraints = await QueryCheckConstraints(conn, schemas, cancellationToken);
+        var exclusionConstraints = await QueryExclusionConstraints(conn, schemas, cancellationToken);
         var indexes = await QueryIndexes(conn, schemas, cancellationToken);
         var schemaComments = await QuerySchemaComments(conn, schemas, cancellationToken);
         var tableComments = await QueryTableComments(conn, schemas, cancellationToken);
@@ -54,7 +55,7 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         var procedureComments = await QueryRoutineComments(conn, schemas, ProcedureKind, cancellationToken);
 
         return Build(
-            tables, columns, primaryKeys, foreignKeys, uniqueConstraints, checkConstraints, indexes,
+            tables, columns, primaryKeys, foreignKeys, uniqueConstraints, checkConstraints, exclusionConstraints, indexes,
             schemaComments, tableComments, columnComments, indexComments, constraintComments,
             schemaGrants, tableGrants, views, viewComments, viewDependencies,
             enums, enumComments, sequences, sequenceComments,
@@ -376,6 +377,63 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         }
 
         return expression[1..^1].Trim();
+    }
+
+    private static async Task<List<ExclusionConstraintRow>> QueryExclusionConstraints(NpgsqlConnection conn, string[]? schemas, CancellationToken ct)
+    {
+        var rows = new List<ExclusionConstraintRow>();
+        await using var cmd = conn.CreateCommand();
+        // Exclusion constraints (contype = 'x'). Each is backed by an index (conindid): the index supplies the
+        // access method and the per-element column/expression text (read the same way as a plain index), while
+        // conexclop supplies the parallel operator for each element. The conexclop unnest joins on position, so it
+        // naturally restricts to the key elements (any INCLUDE columns have no operator and drop out). The access
+        // method is btree-folded to null so an EXCLUDE without USING round-trips clean.
+        cmd.CommandText = """
+            SELECT
+                n.nspname AS table_schema,
+                t.relname AS table_name,
+                c.conname AS constraint_name,
+                NULLIF(am.amname, 'btree') AS method,
+                pg_get_expr(ix.indpred, ix.indrelid) AS predicate,
+                array_agg(CASE WHEN k.attnum = 0 THEN pg_get_indexdef(c.conindid, k.ordinality::int, true) ELSE a.attname END ORDER BY k.ordinality) AS element_texts,
+                array_agg(k.attnum = 0 ORDER BY k.ordinality) AS is_expressions,
+                array_agg(op.oprname ORDER BY k.ordinality) AS operators
+            FROM pg_constraint c
+            JOIN pg_class     t  ON t.oid = c.conrelid
+            JOIN pg_namespace n  ON n.oid = t.relnamespace
+            JOIN pg_index     ix ON ix.indexrelid = c.conindid
+            JOIN pg_class     i  ON i.oid = c.conindid
+            JOIN pg_am        am ON am.oid = i.relam
+            JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS k(attnum, ordinality) ON TRUE
+            LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
+            JOIN LATERAL unnest(c.conexclop) WITH ORDINALITY AS e(opoid, eord) ON e.eord = k.ordinality
+            JOIN pg_operator op ON op.oid = e.opoid
+            WHERE c.contype = 'x'
+            AND (@schemas::text[] IS NULL OR n.nspname = ANY(@schemas))
+            AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+            AND n.nspname NOT LIKE 'pg\_toast%' ESCAPE '\'
+            AND n.nspname NOT LIKE 'pg\_temp%' ESCAPE '\'
+            GROUP BY n.nspname, t.relname, c.conname, am.amname, ix.indpred, ix.indrelid, c.conindid
+            ORDER BY n.nspname, t.relname, c.conname
+            """;
+        AddSchemasParameter(cmd, schemas);
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows.Add(new ExclusionConstraintRow(
+                TableSchema: reader.GetString(0),
+                TableName: reader.GetString(1),
+                ConstraintName: reader.GetString(2),
+                Method: reader.IsDBNull(3) ? null : reader.GetString(3),
+                Predicate: reader.IsDBNull(4) ? null : reader.GetString(4),
+                ElementTexts: reader.GetFieldValue<string[]>(5),
+                IsExpressions: reader.GetFieldValue<bool[]>(6),
+                Operators: reader.GetFieldValue<string[]>(7)
+            ));
+        }
+
+        return rows;
     }
 
     private static async Task<Dictionary<(string, string, string), string?>> QueryConstraintComments(NpgsqlConnection conn, string[]? schemas, CancellationToken ct)
@@ -1040,6 +1098,7 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         List<ForeignKeyRow> foreignKeys,
         List<UniqueConstraintRow> uniqueConstraints,
         List<CheckConstraintRow> checkConstraints,
+        List<ExclusionConstraintRow> exclusionConstraints,
         List<IndexRow> indexes,
         Dictionary<string, string?> schemaComments,
         Dictionary<(string, string), string?> tableComments,
@@ -1065,7 +1124,7 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
             .GroupBy(t => t.Schema)
             .ToDictionary(
                 g => g.Key,
-                g => g.Select(t => BuildTable(t, columns, primaryKeys, foreignKeys, uniqueConstraints, checkConstraints, indexes, tableComments, columnComments, indexComments, constraintComments, tableGrants)).ToList());
+                g => g.Select(t => BuildTable(t, columns, primaryKeys, foreignKeys, uniqueConstraints, checkConstraints, exclusionConstraints, indexes, tableComments, columnComments, indexComments, constraintComments, tableGrants)).ToList());
 
         var viewsBySchema = views
             .GroupBy(v => v.Schema)
@@ -1180,6 +1239,7 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         List<ForeignKeyRow> allForeignKeys,
         List<UniqueConstraintRow> allUniqueConstraints,
         List<CheckConstraintRow> allCheckConstraints,
+        List<ExclusionConstraintRow> allExclusionConstraints,
         List<IndexRow> allIndexes,
         Dictionary<(string, string), string?> tableComments,
         Dictionary<(string, string, string), string?> columnComments,
@@ -1217,6 +1277,11 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
                 constraintComments.GetValueOrDefault((tableRow.Schema, tableRow.Name, c.ConstraintName))))
             .ToList();
 
+        var exclusions = allExclusionConstraints
+            .Where(e => e.TableSchema == tableRow.Schema && e.TableName == tableRow.Name)
+            .Select(e => MapExclusionConstraint(e, constraintComments.GetValueOrDefault((tableRow.Schema, tableRow.Name, e.ConstraintName))))
+            .ToList();
+
         var idxs = allIndexes
             .Where(i => i.SchemaName == tableRow.Schema && i.TableName == tableRow.Name)
             .Select(i => MapIndex(i, indexComments.GetValueOrDefault((tableRow.Schema, i.IndexName))))
@@ -1239,9 +1304,21 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
             ForeignKeys: fks,
             UniqueConstraints: uniques,
             CheckConstraints: checks,
+            ExclusionConstraints: exclusions,
             Indexes: idxs,
             Grants: grants
         );
+    }
+
+    private static ExclusionConstraint MapExclusionConstraint(ExclusionConstraintRow row, string? comment)
+    {
+        var elements = new List<ExclusionElement>();
+        for (var i = 0; i < row.ElementTexts.Length; i++)
+        {
+            elements.Add(new ExclusionElement(row.ElementTexts[i], row.Operators[i], row.IsExpressions[i]));
+        }
+
+        return new ExclusionConstraint(row.ConstraintName, elements, row.Method, row.Predicate, comment);
     }
 
     // ── Mapping ───────────────────────────────────────────────────────────────

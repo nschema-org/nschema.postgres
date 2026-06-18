@@ -1,5 +1,6 @@
 using NSchema.Plan.Model;
 using NSchema.Plan.Model.Columns;
+using NSchema.Plan.Model.Constraints;
 using NSchema.Plan.Model.Enums;
 using NSchema.Plan.Model.Indexes;
 using NSchema.Plan.Model.Routines;
@@ -9,6 +10,7 @@ using NSchema.Plan.Model.Tables;
 using NSchema.Plan.Model.Views;
 using NSchema.Postgres.Sql;
 using NSchema.Schema.Model.Columns;
+using NSchema.Schema.Model.Constraints;
 using NSchema.Schema.Model.Enums;
 using NSchema.Schema.Model.Indexes;
 using NSchema.Schema.Model.Routines;
@@ -126,6 +128,15 @@ public sealed class PostgresSqlGeneratorSnapshotTests
             [new IndexColumn("created_at", Sort: IndexSort.Descending, Nulls: IndexNulls.Last), new IndexColumn("lower(email)", IsExpression: true)],
             Include: ["id", "notes"])),
         new DropIndex("public", "users", "idx_users_email"));
+
+    [Fact]
+    public Task ExclusionConstraintOperations() => VerifyPlan(
+        new AddExclusionConstraint("public", "bookings", new ExclusionConstraint("no_overlap",
+            [new ExclusionElement("room", "="), new ExclusionElement("during", "&&")], Method: "gist", Predicate: "room > 0")),
+        // An expression element is parenthesised.
+        new AddExclusionConstraint("public", "events", new ExclusionConstraint("no_clash",
+            [new ExclusionElement("tstzrange(starts, ends)", "&&", IsExpression: true)], Method: "gist")),
+        new DropExclusionConstraint("public", "bookings", "no_overlap"));
 
     // ── Views ─────────────────────────────────────────────────────────────────
 

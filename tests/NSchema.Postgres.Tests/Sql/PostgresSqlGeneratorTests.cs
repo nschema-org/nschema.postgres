@@ -478,6 +478,55 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         exists.ShouldBeFalse();
     }
 
+    // ── Exclusion constraint operations ───────────────────────────────────────
+
+    [Fact]
+    public async Task AddExclusionConstraint_MultiElement_RoundTripsThroughIntrospection()
+    {
+        // Arrange — the canonical "no overlapping booking of the same room": a scalar `=` plus a range `&&`.
+        // The scalar element in a gist index needs btree_gist (a contrib extension shipped with the image).
+        await Exec("CREATE EXTENSION IF NOT EXISTS btree_gist");
+        await Exec($"""CREATE TABLE "{_schema}".bookings (room integer, during tstzrange)""");
+        var exclusion = new ExclusionConstraint("no_overlap",
+            [new ExclusionElement("room", "="), new ExclusionElement("during", "&&")], Method: "gist", Predicate: "room > 0");
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new AddExclusionConstraint(_schema, "bookings", exclusion)], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        var provider = new PostgresSchemaProvider(_dataSource);
+        var introspected = (await provider.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Tables[0].ExclusionConstraints.ShouldHaveSingleItem();
+        introspected.Name.ShouldBe("no_overlap");
+        introspected.Method.ShouldBe("gist");
+        introspected.Predicate.ShouldNotBeNull();
+        introspected.Predicate!.ShouldContain("room > 0");
+        introspected.Elements.Select(e => (e.Expression, e.Operator, e.IsExpression))
+            .ShouldBe([("room", "=", false), ("during", "&&", false)]);
+    }
+
+    [Fact]
+    public async Task AddExclusionConstraint_ExpressionElement_RoundTripsThroughIntrospection()
+    {
+        // Arrange — an expression element (a computed range) excluded with &&. No btree_gist needed.
+        await Exec($"""CREATE TABLE "{_schema}".events (starts timestamptz, ends timestamptz)""");
+        var exclusion = new ExclusionConstraint("no_clash",
+            [new ExclusionElement("tstzrange(starts, ends)", "&&", IsExpression: true)], Method: "gist");
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new AddExclusionConstraint(_schema, "events", exclusion)], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        var provider = new PostgresSchemaProvider(_dataSource);
+        var element = (await provider.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Tables[0].ExclusionConstraints.ShouldHaveSingleItem().Elements.ShouldHaveSingleItem();
+        element.IsExpression.ShouldBeTrue();
+        element.Expression.ShouldContain("tstzrange");
+        element.Operator.ShouldBe("&&");
+    }
+
     // ── Constraint comments ───────────────────────────────────────────────────
 
     [Fact]
