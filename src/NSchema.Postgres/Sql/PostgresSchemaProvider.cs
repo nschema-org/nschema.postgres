@@ -116,7 +116,8 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
                 c.is_identity,
                 seq.seqstart   AS identity_start,
                 seq.seqmin     AS identity_min_value,
-                seq.seqincrement AS identity_increment
+                seq.seqincrement AS identity_increment,
+                CASE WHEN c.is_generated = 'ALWAYS' THEN c.generation_expression END AS generation_expression
             FROM information_schema.columns c
             LEFT JOIN pg_class        t  ON t.relname   = c.table_name
                                         AND t.relkind   = 'r'
@@ -157,7 +158,8 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
                 IsIdentity: reader.GetString(12) == "YES",
                 IdentityStart: reader.IsDBNull(13) ? null : reader.GetInt64(13),
                 IdentityMinValue: reader.IsDBNull(14) ? null : reader.GetInt64(14),
-                IdentityIncrement: reader.IsDBNull(15) ? null : reader.GetInt64(15)
+                IdentityIncrement: reader.IsDBNull(15) ? null : reader.GetInt64(15),
+                GeneratedExpression: reader.IsDBNull(16) ? null : reader.GetString(16)
             ));
         }
 
@@ -1287,7 +1289,7 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         var identityOptions = row.IsIdentity
             ? new IdentityOptions(row.IdentityStart, row.IdentityMinValue, row.IdentityIncrement)
             : null;
-        return new Column(row.ColumnName, type, row.IsNullable, row.IsIdentity, row.DefaultExpression, null, comment, identityOptions);
+        return new Column(row.ColumnName, type, row.IsNullable, row.IsIdentity, row.DefaultExpression, null, comment, identityOptions, row.GeneratedExpression);
     }
 
     private static SqlType MapSqlType(string dataType, string udtName, string? domainSchema, string? domainName, int? maxLength, int? precision, int? scale)

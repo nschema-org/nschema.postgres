@@ -16,4 +16,5 @@ internal sealed record ColumnRow(
     bool IsIdentity,
     long? IdentityStart = null,
     long? IdentityMinValue = null,
-    long? IdentityIncrement = null);
+    long? IdentityIncrement = null,
+    string? GeneratedExpression = null);

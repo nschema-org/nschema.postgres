@@ -297,6 +297,54 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         hasDefault.ShouldBeFalse();
     }
 
+    [Fact]
+    public async Task RoundTrip_GeneratedColumn_IntrospectsAsGeneratedNotDefault()
+    {
+        // Arrange — a stored generated column applied via CREATE TABLE must read back as generated, with the
+        // expression in GeneratedExpression and no DefaultExpression (the two are mutually exclusive).
+        var table = new Table("boxes", Columns:
+        [
+            new Column("w", SqlType.Int, IsNullable: false),
+            new Column("h", SqlType.Int, IsNullable: false),
+            new Column("area", SqlType.Int, GeneratedExpression: "w * h"),
+        ]);
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new CreateTable(_schema, table)], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        var provider = new PostgresSchemaProvider(_dataSource);
+        var area = (await provider.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Tables[0].Columns.Single(c => c.Name == "area");
+        area.GeneratedExpression.ShouldNotBeNull();
+        area.GeneratedExpression!.ShouldContain("w * h");
+        area.DefaultExpression.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task SetColumnGenerated_ChangesAndDropsExpression()
+    {
+        // Arrange
+        await Exec($"""CREATE TABLE "{_schema}".boxes (w int, h int, area int GENERATED ALWAYS AS (w * h) STORED)""");
+        var provider = new PostgresSchemaProvider(_dataSource);
+
+        // Act — change the expression (SET EXPRESSION)...
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new SetColumnGenerated(_schema, "boxes", "area", "w * h", "w + h")], [], [])), TestContext.Current.CancellationToken);
+        var changed = (await provider.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Tables[0].Columns.Single(c => c.Name == "area");
+
+        // ...then drop it (DROP EXPRESSION), making it a plain column.
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new SetColumnGenerated(_schema, "boxes", "area", "w + h", null)], [], [])), TestContext.Current.CancellationToken);
+        var dropped = (await provider.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Tables[0].Columns.Single(c => c.Name == "area");
+
+        // Assert
+        changed.GeneratedExpression!.ShouldContain("w + h");
+        dropped.GeneratedExpression.ShouldBeNull();
+    }
+
     // ── Primary key operations ────────────────────────────────────────────────
 
     [Fact]

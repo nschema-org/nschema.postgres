@@ -88,6 +88,20 @@ public sealed class PostgresSqlGeneratorSnapshotTests
             OldOptions: new IdentityOptions(StartWith: 1, MinValue: 1, IncrementBy: 1),
             NewOptions: new IdentityOptions(StartWith: 500, MinValue: 100, IncrementBy: 2)));
 
+    [Fact]
+    public Task GeneratedColumnOperations() => VerifyPlan(
+        new CreateTable("public", new Table("boxes",
+            Columns:
+            [
+                new Column("w", SqlType.Int, IsNullable: false),
+                new Column("h", SqlType.Int, IsNullable: false),
+                new Column("area", SqlType.Int, GeneratedExpression: "w * h"),
+            ])),
+        new AddColumn("public", "boxes", new Column("perimeter", SqlType.Int, GeneratedExpression: "2 * (w + h)")),
+        // Change the expression in place (SET EXPRESSION), then drop the generation (DROP EXPRESSION).
+        new SetColumnGenerated("public", "boxes", "area", "w * h", "w * h * 2"),
+        new SetColumnGenerated("public", "boxes", "area", "w * h * 2", null));
+
     // ── Keys, indexes and constraints ───────────────────────────────────────────
 
     [Fact]

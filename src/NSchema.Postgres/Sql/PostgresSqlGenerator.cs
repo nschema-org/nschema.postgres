@@ -58,6 +58,7 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
         AlterIdentitySequence x => BuildAlterIdentitySequence(x),
         SetColumnDefault { NewDefault: null } x => $"""ALTER TABLE "{x.SchemaName}"."{x.TableName}" ALTER COLUMN "{x.ColumnName}" DROP DEFAULT""",
         SetColumnDefault x => $"""ALTER TABLE "{x.SchemaName}"."{x.TableName}" ALTER COLUMN "{x.ColumnName}" SET DEFAULT {x.NewDefault}""",
+        SetColumnGenerated x => BuildSetColumnGenerated(x),
         AddPrimaryKey x => $"""ALTER TABLE "{x.SchemaName}"."{x.TableName}" ADD CONSTRAINT "{x.PrimaryKey.Name}" PRIMARY KEY ({ColList(x.PrimaryKey.ColumnNames)})""",
         DropPrimaryKey x => $"ALTER TABLE \"{x.SchemaName}\".\"{x.TableName}\" DROP CONSTRAINT \"{x.PrimaryKeyName}\"",
         AddForeignKey x => BuildAddForeignKey(x),
@@ -186,7 +187,9 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
         var nullable = col.IsNullable ? "" : " NOT NULL";
         var identity = col.IsIdentity ? BuildIdentityClause(col.IdentityOptions) : "";
         var def = col is { DefaultExpression: { } d, IsIdentity: false } ? $" DEFAULT {d}" : "";
-        return $"\"{col.Name}\" {type}{nullable}{identity}{def}";
+        // A generated column is mutually exclusive with a default (the core's structural policy enforces this).
+        var generated = col.GeneratedExpression is { } g ? $" GENERATED ALWAYS AS ({g}) STORED" : "";
+        return $"\"{col.Name}\" {type}{nullable}{identity}{def}{generated}";
     }
 
     private static string BuildIdentityClause(IdentityOptions? options)
@@ -360,6 +363,17 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
             yield return new SqlStatement($"""COMMENT ON {kind} "{schemaName}"."{name}" IS $comment${comment}$comment$""");
         }
     }
+
+    // Changing a column's generation expression in place: PG 17+ replaces it with SET EXPRESSION, and a generated
+    // column is converted back to a plain one with DROP EXPRESSION (data is kept). PostgreSQL has no in-place way
+    // to make an existing plain column generated, so that transition is rejected — the column must be re-added.
+    private static string BuildSetColumnGenerated(SetColumnGenerated x) => x switch
+    {
+        { NewExpression: null } => $"""ALTER TABLE "{x.SchemaName}"."{x.TableName}" ALTER COLUMN "{x.ColumnName}" DROP EXPRESSION""",
+        { OldExpression: not null, NewExpression: { } expr } => $"""ALTER TABLE "{x.SchemaName}"."{x.TableName}" ALTER COLUMN "{x.ColumnName}" SET EXPRESSION AS ({expr})""",
+        _ => throw new NotSupportedException(
+            $"""Cannot make existing column "{x.SchemaName}"."{x.TableName}"."{x.ColumnName}" generated in place; PostgreSQL has no ADD GENERATED — drop and re-add the column."""),
+    };
 
     private static string RoutineKeyword(RoutineKind kind) => kind == RoutineKind.Procedure ? "PROCEDURE" : "FUNCTION";
 
