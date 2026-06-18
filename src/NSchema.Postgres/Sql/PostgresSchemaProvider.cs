@@ -1632,10 +1632,25 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         var level = (row.TgType & 1) != 0 ? TriggerLevel.Row : TriggerLevel.Statement;
 
         var events = TriggerEvent.None;
-        if ((row.TgType & 4) != 0) events |= TriggerEvent.Insert;
-        if ((row.TgType & 8) != 0) events |= TriggerEvent.Delete;
-        if ((row.TgType & 16) != 0) events |= TriggerEvent.Update;
-        if ((row.TgType & 32) != 0) events |= TriggerEvent.Truncate;
+        if ((row.TgType & 4) != 0)
+        {
+            events |= TriggerEvent.Insert;
+        }
+
+        if ((row.TgType & 8) != 0)
+        {
+            events |= TriggerEvent.Delete;
+        }
+
+        if ((row.TgType & 16) != 0)
+        {
+            events |= TriggerEvent.Update;
+        }
+
+        if ((row.TgType & 32) != 0)
+        {
+            events |= TriggerEvent.Truncate;
+        }
 
         return new Trigger(row.Name, timing, events, row.Function, level,
             UpdateOfColumns: row.UpdateOfColumns, When: row.When, FunctionArguments: row.FunctionArguments, Comment: row.Comment);
