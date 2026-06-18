@@ -709,15 +709,17 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
     {
         var rows = new List<ViewRow>();
         await using var cmd = conn.CreateCommand();
-        // relkind 'v' = plain views (materialized views, 'm', are not part of the model). pg_get_viewdef returns the
-        // canonical definition — this is what makes apply → plan round-trip cleanly: state captures the DB's own form.
+        // relkind 'v' = plain views, 'm' = materialized views (one model, distinguished by the flag). pg_get_viewdef
+        // returns the canonical definition for both — this is what makes apply → plan round-trip cleanly: state
+        // captures the DB's own form.
         cmd.CommandText = """
             SELECT n.nspname AS schema_name,
                    c.relname AS view_name,
-                   pg_get_viewdef(c.oid) AS definition
+                   pg_get_viewdef(c.oid) AS definition,
+                   c.relkind = 'm' AS is_materialized
             FROM pg_class c
             JOIN pg_namespace n ON n.oid = c.relnamespace
-            WHERE c.relkind = 'v'
+            WHERE c.relkind IN ('v', 'm')
             AND (@schemas::text[] IS NULL OR n.nspname = ANY(@schemas))
             AND n.nspname NOT IN ('pg_catalog', 'information_schema')
             AND n.nspname NOT LIKE 'pg\_toast%' ESCAPE '\'
@@ -729,7 +731,7 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
-            rows.Add(new ViewRow(reader.GetString(0), reader.GetString(1), CleanViewBody(reader.GetString(2))));
+            rows.Add(new ViewRow(reader.GetString(0), reader.GetString(1), CleanViewBody(reader.GetString(2)), reader.GetBoolean(3)));
         }
 
         return rows;
@@ -793,7 +795,7 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
                                  AND dep.refclassid = 'pg_class'::regclass
             JOIN pg_class     d  ON d.oid  = dep.refobjid
             JOIN pg_namespace dn ON dn.oid = d.relnamespace
-            WHERE v.relkind = 'v'
+            WHERE v.relkind IN ('v', 'm')
             AND d.relkind IN ('r', 'v', 'm')
             AND d.oid <> v.oid
             AND (@schemas::text[] IS NULL OR vn.nspname = ANY(@schemas))
@@ -1130,7 +1132,7 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
             .GroupBy(v => v.Schema)
             .ToDictionary(
                 g => g.Key,
-                g => g.Select(v => BuildView(v, viewComments, viewDependencies)).ToList());
+                g => g.Select(v => BuildView(v, viewComments, viewDependencies, indexes, indexComments)).ToList());
 
         var enumsBySchema = enums
             .GroupBy(e => e.Schema)
@@ -1222,14 +1224,28 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
     private static View BuildView(
         ViewRow row,
         Dictionary<(string, string), string?> viewComments,
-        List<ViewDependencyRow> viewDependencies)
+        List<ViewDependencyRow> viewDependencies,
+        List<IndexRow> allIndexes,
+        Dictionary<(string, string), string?> indexComments)
     {
         var dependsOn = viewDependencies
             .Where(d => d.ViewSchema == row.Schema && d.ViewName == row.Name)
             .Select(d => new ViewDependency(d.RefSchema, d.RefName))
             .ToList();
         viewComments.TryGetValue((row.Schema, row.Name), out var comment);
-        return new View(row.Name, row.Definition, OldName: null, Comment: comment, DependsOn: dependsOn);
+
+        // Only a materialized view can carry indexes; the same index rows that a table would consume are routed
+        // here when the relation they sit on is this matview (relation names are unique per schema, so there is no
+        // overlap with a table's indexes).
+        var indexes = row.IsMaterialized
+            ? allIndexes
+                .Where(i => i.SchemaName == row.Schema && i.TableName == row.Name)
+                .Select(i => MapIndex(i, indexComments.GetValueOrDefault((row.Schema, i.IndexName))))
+                .ToList()
+            : [];
+
+        return new View(row.Name, row.Definition, OldName: null, Comment: comment, DependsOn: dependsOn,
+            IsMaterialized: row.IsMaterialized, Indexes: indexes);
     }
 
     private static Table BuildTable(

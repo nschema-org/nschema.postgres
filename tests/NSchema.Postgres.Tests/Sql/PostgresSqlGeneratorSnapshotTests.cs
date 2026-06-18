@@ -148,6 +148,16 @@ public sealed class PostgresSqlGeneratorSnapshotTests
         new SetViewComment("public", "active_users", "Active users only", null),
         new DropView("public", "active_users"));
 
+    [Fact]
+    public Task MaterializedViewOperations() => VerifyPlan(
+        // A materialized view: CREATE MATERIALIZED VIEW (never CREATE OR REPLACE), an index on it (a plain
+        // CreateIndex), and the MATERIALIZED variants of rename/comment/drop.
+        new CreateView("public", new View("daily_totals", "SELECT date, sum(amount) AS total FROM public.sales GROUP BY date", IsMaterialized: true)),
+        new CreateIndex("public", "daily_totals", new TableIndex("idx_daily_totals_date", ["date"], IsUnique: true)),
+        new RenameView("public", "legacy_totals", "daily_totals", IsMaterialized: true),
+        new SetViewComment("public", "daily_totals", null, "Daily rollup", IsMaterialized: true),
+        new DropView("public", "daily_totals", IsMaterialized: true));
+
     // ── Enums ──────────────────────────────────────────────────────────────────
 
     [Fact]

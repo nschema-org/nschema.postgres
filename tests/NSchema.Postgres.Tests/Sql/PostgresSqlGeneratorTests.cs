@@ -736,6 +736,31 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         comment.ShouldBe("the view");
     }
 
+    [Fact]
+    public async Task RoundTrip_MaterializedView_IntrospectsAsMaterializedWithIndex()
+    {
+        // Arrange — a materialized view over a base table, plus a unique index on it.
+        await Exec($"""CREATE TABLE "{_schema}".sales (id integer, amount integer)""");
+        var view = new View("totals", $"""SELECT id, sum(amount) AS total FROM "{_schema}".sales GROUP BY id""", IsMaterialized: true);
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new CreateView(_schema, view)], [], [])), TestContext.Current.CancellationToken);
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new CreateIndex(_schema, "totals", new TableIndex("idx_totals_id", ["id"], IsUnique: true))], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        var provider = new PostgresSchemaProvider(_dataSource);
+        var introspected = (await provider.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Views.ShouldHaveSingleItem();
+        introspected.IsMaterialized.ShouldBeTrue();
+        introspected.Body.ShouldContain("sum");
+        introspected.DependsOn.ShouldContain(d => d.Name == "sales");
+        var index = introspected.Indexes.ShouldHaveSingleItem();
+        index.Name.ShouldBe("idx_totals_id");
+        index.IsUnique.ShouldBeTrue();
+        index.Columns.ShouldHaveSingleItem().Expression.ShouldBe("id");
+    }
+
     // ── Deployment scripts ────────────────────────────────────────────────────
 
     [Fact]

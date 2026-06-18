@@ -75,12 +75,16 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
         // A view Add and a body Modify both arrive as CreateView; CREATE OR REPLACE serves both. An incompatible
         // output-column change (rename/drop/retype/reorder) is rejected loudly by Postgres rather than silently
         // dropping dependents — see CLAUDE.md / the core view-body decision.
+        // A materialized view has no CREATE OR REPLACE form, so the core plans a body change as drop + recreate;
+        // CreateView for a matview is therefore always a fresh CREATE MATERIALIZED VIEW. A plain view's body
+        // change is an in-place CREATE OR REPLACE.
+        CreateView { View.IsMaterialized: true } x => $"""CREATE MATERIALIZED VIEW "{x.SchemaName}"."{x.View.Name}" AS {x.View.Body}""",
         CreateView x => $"""CREATE OR REPLACE VIEW "{x.SchemaName}"."{x.View.Name}" AS {x.View.Body}""",
-        DropView x => $"DROP VIEW \"{x.SchemaName}\".\"{x.ViewName}\"",
-        RenameView x => $"ALTER VIEW \"{x.SchemaName}\".\"{x.OldName}\" RENAME TO \"{x.NewName}\"",
+        DropView x => $"DROP {ViewKind(x.IsMaterialized)} \"{x.SchemaName}\".\"{x.ViewName}\"",
+        RenameView x => $"ALTER {ViewKind(x.IsMaterialized)} \"{x.SchemaName}\".\"{x.OldName}\" RENAME TO \"{x.NewName}\"",
         SetViewComment x => x.NewComment is null
-            ? $"""COMMENT ON VIEW "{x.SchemaName}"."{x.ViewName}" IS NULL"""
-            : $"""COMMENT ON VIEW "{x.SchemaName}"."{x.ViewName}" IS $comment${x.NewComment}$comment$""",
+            ? $"""COMMENT ON {ViewKind(x.IsMaterialized)} "{x.SchemaName}"."{x.ViewName}" IS NULL"""
+            : $"""COMMENT ON {ViewKind(x.IsMaterialized)} "{x.SchemaName}"."{x.ViewName}" IS $comment${x.NewComment}$comment$""",
         CreateEnum x => BuildCreateEnum(x),
         DropEnum x => $"DROP TYPE \"{x.SchemaName}\".\"{x.EnumName}\"",
         RenameEnum x => $"ALTER TYPE \"{x.SchemaName}\".\"{x.OldName}\" RENAME TO \"{x.NewName}\"",
@@ -394,6 +398,8 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
         _ => throw new NotSupportedException(
             $"""Cannot make existing column "{x.SchemaName}"."{x.TableName}"."{x.ColumnName}" generated in place; PostgreSQL has no ADD GENERATED — drop and re-add the column."""),
     };
+
+    private static string ViewKind(bool isMaterialized) => isMaterialized ? "MATERIALIZED VIEW" : "VIEW";
 
     private static string RoutineKeyword(RoutineKind kind) => kind == RoutineKind.Procedure ? "PROCEDURE" : "FUNCTION";
 
