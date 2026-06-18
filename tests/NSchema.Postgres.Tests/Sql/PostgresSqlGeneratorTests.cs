@@ -1,8 +1,33 @@
 using Npgsql;
 using NSchema.Plan.Model;
+using NSchema.Plan.Model.Columns;
+using NSchema.Plan.Model.CompositeTypes;
+using NSchema.Plan.Model.Constraints;
+using NSchema.Plan.Model.Domains;
+using NSchema.Plan.Model.Enums;
+using NSchema.Plan.Model.Extensions;
+using NSchema.Plan.Model.Indexes;
+using NSchema.Plan.Model.Routines;
+using NSchema.Plan.Model.Schemas;
+using NSchema.Plan.Model.Sequence;
+using NSchema.Plan.Model.Tables;
+using NSchema.Plan.Model.Triggers;
+using NSchema.Plan.Model.Views;
 using NSchema.Postgres.Sql;
 using NSchema.Postgres.Tests.Fixtures;
-using NSchema.Schema.Model;
+using NSchema.Schema.Model.Columns;
+using NSchema.Schema.Model.CompositeTypes;
+using NSchema.Schema.Model.Constraints;
+using NSchema.Schema.Model.Domains;
+using NSchema.Schema.Model.Enums;
+using NSchema.Schema.Model.Extensions;
+using NSchema.Schema.Model.Indexes;
+using NSchema.Schema.Model.Routines;
+using NSchema.Schema.Model.Scripts;
+using NSchema.Schema.Model.Sequences;
+using NSchema.Schema.Model.Tables;
+using NSchema.Schema.Model.Triggers;
+using NSchema.Schema.Model.Views;
 using NSchema.Sql.Model;
 
 namespace NSchema.Postgres.Tests.Sql;
@@ -280,6 +305,54 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         hasDefault.ShouldBeFalse();
     }
 
+    [Fact]
+    public async Task RoundTrip_GeneratedColumn_IntrospectsAsGeneratedNotDefault()
+    {
+        // Arrange — a stored generated column applied via CREATE TABLE must read back as generated, with the
+        // expression in GeneratedExpression and no DefaultExpression (the two are mutually exclusive).
+        var table = new Table("boxes", Columns:
+        [
+            new Column("w", SqlType.Int, IsNullable: false),
+            new Column("h", SqlType.Int, IsNullable: false),
+            new Column("area", SqlType.Int, GeneratedExpression: "w * h"),
+        ]);
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new CreateTable(_schema, table)], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        var provider = new PostgresSchemaProvider(_dataSource);
+        var area = (await provider.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Tables[0].Columns.Single(c => c.Name == "area");
+        area.GeneratedExpression.ShouldNotBeNull();
+        area.GeneratedExpression!.ShouldContain("w * h");
+        area.DefaultExpression.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task SetColumnGenerated_ChangesAndDropsExpression()
+    {
+        // Arrange
+        await Exec($"""CREATE TABLE "{_schema}".boxes (w int, h int, area int GENERATED ALWAYS AS (w * h) STORED)""");
+        var provider = new PostgresSchemaProvider(_dataSource);
+
+        // Act — change the expression (SET EXPRESSION)...
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new SetColumnGenerated(_schema, "boxes", "area", "w * h", "w + h")], [], [])), TestContext.Current.CancellationToken);
+        var changed = (await provider.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Tables[0].Columns.Single(c => c.Name == "area");
+
+        // ...then drop it (DROP EXPRESSION), making it a plain column.
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new SetColumnGenerated(_schema, "boxes", "area", "w + h", null)], [], [])), TestContext.Current.CancellationToken);
+        var dropped = (await provider.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Tables[0].Columns.Single(c => c.Name == "area");
+
+        // Assert
+        changed.GeneratedExpression!.ShouldContain("w + h");
+        dropped.GeneratedExpression.ShouldBeNull();
+    }
+
     // ── Primary key operations ────────────────────────────────────────────────
 
     [Fact]
@@ -413,6 +486,55 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         exists.ShouldBeFalse();
     }
 
+    // ── Exclusion constraint operations ───────────────────────────────────────
+
+    [Fact]
+    public async Task AddExclusionConstraint_MultiElement_RoundTripsThroughIntrospection()
+    {
+        // Arrange — the canonical "no overlapping booking of the same room": a scalar `=` plus a range `&&`.
+        // The scalar element in a gist index needs btree_gist (a contrib extension shipped with the image).
+        await Exec("CREATE EXTENSION IF NOT EXISTS btree_gist");
+        await Exec($"""CREATE TABLE "{_schema}".bookings (room integer, during tstzrange)""");
+        var exclusion = new ExclusionConstraint("no_overlap",
+            [new ExclusionElement("room", "="), new ExclusionElement("during", "&&")], Method: "gist", Predicate: "room > 0");
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new AddExclusionConstraint(_schema, "bookings", exclusion)], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        var provider = new PostgresSchemaProvider(_dataSource);
+        var introspected = (await provider.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Tables[0].ExclusionConstraints.ShouldHaveSingleItem();
+        introspected.Name.ShouldBe("no_overlap");
+        introspected.Method.ShouldBe("gist");
+        introspected.Predicate.ShouldNotBeNull();
+        introspected.Predicate!.ShouldContain("room > 0");
+        introspected.Elements.Select(e => (e.Expression, e.Operator, e.IsExpression))
+            .ShouldBe([("room", "=", false), ("during", "&&", false)]);
+    }
+
+    [Fact]
+    public async Task AddExclusionConstraint_ExpressionElement_RoundTripsThroughIntrospection()
+    {
+        // Arrange — an expression element (a computed range) excluded with &&. No btree_gist needed.
+        await Exec($"""CREATE TABLE "{_schema}".events (starts timestamptz, ends timestamptz)""");
+        var exclusion = new ExclusionConstraint("no_clash",
+            [new ExclusionElement("tstzrange(starts, ends)", "&&", IsExpression: true)], Method: "gist");
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new AddExclusionConstraint(_schema, "events", exclusion)], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        var provider = new PostgresSchemaProvider(_dataSource);
+        var element = (await provider.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Tables[0].ExclusionConstraints.ShouldHaveSingleItem().Elements.ShouldHaveSingleItem();
+        element.IsExpression.ShouldBeTrue();
+        element.Expression.ShouldContain("tstzrange");
+        element.Operator.ShouldBe("&&");
+    }
+
     // ── Constraint comments ───────────────────────────────────────────────────
 
     [Fact]
@@ -478,6 +600,49 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         var isUnique = await ScalarBool(
             $"SELECT ix.indisunique FROM pg_indexes pi JOIN pg_class t ON t.relname = pi.tablename JOIN pg_index ix ON ix.indexrelid = (SELECT oid FROM pg_class WHERE relname = 'idx_items_code_unique') WHERE pi.schemaname = '{_schema}' AND pi.indexname = 'idx_items_code_unique'");
         isUnique.ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task CreateIndex_RichIndex_RoundTripsThroughIntrospection()
+    {
+        // Arrange — a covering index with a descending key, an explicit non-default null ordering, and an
+        // expression key. What is applied must introspect back to the same shape (no phantom drift).
+        await Exec($"""CREATE TABLE "{_schema}"."items" (id integer, name text, qty integer)""");
+        var index = new TableIndex("idx_items_rich",
+            [new IndexColumn("id", Sort: IndexSort.Descending, Nulls: IndexNulls.Last), new IndexColumn("lower(name)", IsExpression: true)],
+            Include: ["qty"]);
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new CreateIndex(_schema, "items", index)], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        var provider = new PostgresSchemaProvider(_dataSource);
+        var introspected = (await provider.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Tables[0].Indexes.ShouldHaveSingleItem();
+        introspected.Method.ShouldBeNull(); // btree folds to null
+        introspected.Include.ShouldBe(["qty"]);
+        introspected.Columns.Count.ShouldBe(2);
+        introspected.Columns[0].ShouldBe(new IndexColumn("id", IsExpression: false, Sort: IndexSort.Descending, Nulls: IndexNulls.Last));
+        introspected.Columns[1].IsExpression.ShouldBeTrue();
+        introspected.Columns[1].Expression.ShouldContain("lower");
+    }
+
+    [Fact]
+    public async Task CreateIndex_GinMethod_RoundTripsPreservingMethod()
+    {
+        // Arrange — a non-btree access method must survive introspection (it does not fold to null).
+        await Exec($"""CREATE TABLE "{_schema}"."docs" (tags text[])""");
+        var index = new TableIndex("idx_docs_tags", ["tags"], Method: "gin");
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new CreateIndex(_schema, "docs", index)], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        var provider = new PostgresSchemaProvider(_dataSource);
+        var introspected = (await provider.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Tables[0].Indexes.ShouldHaveSingleItem();
+        introspected.Method.ShouldBe("gin");
+        introspected.Columns.ShouldHaveSingleItem().Expression.ShouldBe("tags");
     }
 
     [Fact]
@@ -577,6 +742,122 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         var comment = await ScalarString(
             $"SELECT obj_description('\"{_schema}\".\"u\"'::regclass)");
         comment.ShouldBe("the view");
+    }
+
+    [Fact]
+    public async Task RoundTrip_MaterializedView_IntrospectsAsMaterializedWithIndex()
+    {
+        // Arrange — a materialized view over a base table, plus a unique index on it.
+        await Exec($"""CREATE TABLE "{_schema}".sales (id integer, amount integer)""");
+        var view = new View("totals", $"""SELECT id, sum(amount) AS total FROM "{_schema}".sales GROUP BY id""", IsMaterialized: true);
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new CreateView(_schema, view)], [], [])), TestContext.Current.CancellationToken);
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new CreateIndex(_schema, "totals", new TableIndex("idx_totals_id", ["id"], IsUnique: true))], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        var provider = new PostgresSchemaProvider(_dataSource);
+        var introspected = (await provider.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Views.ShouldHaveSingleItem();
+        introspected.IsMaterialized.ShouldBeTrue();
+        introspected.Body.ShouldContain("sum");
+        introspected.DependsOn.ShouldContain(d => d.Name == "sales");
+        var index = introspected.Indexes.ShouldHaveSingleItem();
+        index.Name.ShouldBe("idx_totals_id");
+        index.IsUnique.ShouldBeTrue();
+        index.Columns.ShouldHaveSingleItem().Expression.ShouldBe("id");
+    }
+
+    // ── Triggers ──────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task RoundTrip_Trigger_IntrospectsWithDecodedAttributes()
+    {
+        // Arrange — a trigger function, then a row-level AFTER trigger with UPDATE OF and a WHEN condition.
+        await Exec($"""CREATE TABLE "{_schema}".users (id int, email text, active boolean)""");
+        await Exec($"""CREATE FUNCTION "{_schema}".audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$""");
+        var trigger = new Trigger("users_audit", TriggerTiming.After, TriggerEvent.Insert | TriggerEvent.Update,
+            $"{_schema}.audit", TriggerLevel.Row, UpdateOfColumns: ["email"], When: "new.active");
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new CreateTrigger(_schema, "users", trigger)], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert — the tgtype bitmask decodes back to the same timing/level/events.
+        var provider = new PostgresSchemaProvider(_dataSource);
+        var introspected = (await provider.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Tables[0].Triggers.ShouldHaveSingleItem();
+        introspected.Name.ShouldBe("users_audit");
+        introspected.Timing.ShouldBe(TriggerTiming.After);
+        introspected.Level.ShouldBe(TriggerLevel.Row);
+        introspected.Events.ShouldBe(TriggerEvent.Insert | TriggerEvent.Update);
+        introspected.UpdateOfColumns.ShouldBe(["email"]);
+        introspected.Function.ShouldBe($"{_schema}.audit");
+        introspected.When.ShouldNotBeNull();
+        introspected.When!.ShouldContain("active");
+        introspected.FunctionArguments.ShouldBeNull();
+    }
+
+    // ── Extensions ────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task CreateExtension_ThenIntrospect_ReportsExtension()
+    {
+        // Act — create a contrib extension via the generator (extensions are database-global).
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new CreateExtension(new Extension("hstore"))], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert — it surfaces as a root-level extension with a version; plpgsql is excluded.
+        var provider = new PostgresSchemaProvider(_dataSource);
+        var schema = await provider.GetSchema([_schema], TestContext.Current.CancellationToken);
+        var hstore = schema.Extensions.Single(e => e.Name == "hstore");
+        hstore.Version.ShouldNotBeNull();
+        schema.Extensions.ShouldNotContain(e => e.Name == "plpgsql");
+    }
+
+    // ── Composite types ──────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task RoundTrip_CompositeType_IntrospectsWithFields()
+    {
+        // Arrange
+        var type = new CompositeType("address", [new CompositeField("street", SqlType.Text), new CompositeField("zip", SqlType.Int)]);
+
+        // Act — create, then exercise an in-place field add (ALTER TYPE … ADD ATTRIBUTE).
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new CreateCompositeType(_schema, type)], [], [])), TestContext.Current.CancellationToken);
+        await _executor.Execute(_generator.Generate(new MigrationPlan(
+            [new AddCompositeField(_schema, "address", new CompositeField("country", SqlType.Text))], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        var provider = new PostgresSchemaProvider(_dataSource);
+        var introspected = (await provider.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].CompositeTypes.ShouldHaveSingleItem();
+        introspected.Name.ShouldBe("address");
+        introspected.Fields.Select(f => (f.Name, f.DataType)).ShouldBe(
+            [("street", SqlType.Text), ("zip", SqlType.Int), ("country", SqlType.Text)]);
+    }
+
+    // ── Domains ───────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task RoundTrip_Domain_IntrospectsWithAllFacets()
+    {
+        // Arrange — a domain over text with a default, NOT NULL, and a named check.
+        var domain = new Domain("us_postal", SqlType.Text, Default: "'00000'", NotNull: true,
+            Checks: [new CheckConstraint("us_postal_fmt", "VALUE ~ '^[0-9]{5}$'")]);
+
+        // Act
+        await _executor.Execute(_generator.Generate(new MigrationPlan([new CreateDomain(_schema, domain)], [], [])), TestContext.Current.CancellationToken);
+
+        // Assert
+        var provider = new PostgresSchemaProvider(_dataSource);
+        var introspected = (await provider.GetSchema([_schema], TestContext.Current.CancellationToken))
+            .Schemas[0].Domains.ShouldHaveSingleItem();
+        introspected.Name.ShouldBe("us_postal");
+        introspected.DataType.ShouldBe(SqlType.Text);
+        introspected.NotNull.ShouldBeTrue();
+        introspected.Default.ShouldNotBeNull();
+        introspected.Default!.ShouldContain("00000");
+        introspected.Checks.ShouldHaveSingleItem().Name.ShouldBe("us_postal_fmt");
     }
 
     // ── Deployment scripts ────────────────────────────────────────────────────
@@ -847,12 +1128,12 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
     public async Task CreateFunction_CreatesFunctionInDatabase()
     {
         // Arrange
-        var function = new Function("add_numbers", "a integer, b integer",
+        var function = new Routine("add_numbers", RoutineKind.Function, "a integer, b integer",
             "RETURNS integer LANGUAGE sql AS $$ SELECT a + b $$");
 
         // Act
         await _executor.Execute(_generator.Generate(new MigrationPlan(
-            [new CreateFunction(_schema, function)], [], [])), TestContext.Current.CancellationToken);
+            [new CreateRoutine(_schema, function)], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         (await ScalarString($"""SELECT "{_schema}".add_numbers(2, 3)::text""")).ShouldBe("5");
@@ -863,11 +1144,11 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
     {
         // Arrange — CreateFunction serves both add and definition-only modify; the second create must replace.
         await Exec($"""CREATE FUNCTION "{_schema}".answer() RETURNS integer LANGUAGE sql AS $$ SELECT 1 $$""");
-        var replacement = new Function("answer", "", "RETURNS integer LANGUAGE sql AS $$ SELECT 42 $$");
+        var replacement = new Routine("answer", RoutineKind.Function, "", "RETURNS integer LANGUAGE sql AS $$ SELECT 42 $$");
 
         // Act
         await _executor.Execute(_generator.Generate(new MigrationPlan(
-            [new CreateFunction(_schema, replacement)], [], [])), TestContext.Current.CancellationToken);
+            [new CreateRoutine(_schema, replacement)], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         (await ScalarString($"""SELECT "{_schema}".answer()::text""")).ShouldBe("42");
@@ -882,12 +1163,12 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
             CREATE FUNCTION "{_schema}".add_numbers(a integer, b integer) RETURNS integer LANGUAGE sql AS $$ SELECT a + b $$;
             COMMENT ON FUNCTION "{_schema}".add_numbers IS 'Adds numbers';
             """);
-        var desired = new Function("add_numbers", "a integer, b integer, c integer",
+        var desired = new Routine("add_numbers", RoutineKind.Function, "a integer, b integer, c integer",
             "RETURNS integer LANGUAGE sql AS $$ SELECT a + b + c $$", Comment: "Adds numbers");
 
         // Act
         await _executor.Execute(_generator.Generate(new MigrationPlan(
-            [new RecreateFunction(_schema, desired)], [], [])), TestContext.Current.CancellationToken);
+            [new RecreateRoutine(_schema, desired)], [], [])), TestContext.Current.CancellationToken);
 
         // Assert — exactly one routine remains, under the new signature, with the comment restored.
         var count = await ScalarString($"""
@@ -907,7 +1188,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
 
         // Act
         await _executor.Execute(_generator.Generate(new MigrationPlan(
-            [new RenameFunction(_schema, "old_answer", "answer")], [], [])), TestContext.Current.CancellationToken);
+            [new RenameRoutine(_schema, "old_answer", "answer", RoutineKind.Function)], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         (await ScalarString($"""SELECT "{_schema}".answer()::text""")).ShouldBe("42");
@@ -922,12 +1203,12 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
 
         // Act + Assert — set...
         await _executor.Execute(_generator.Generate(new MigrationPlan(
-            [new SetFunctionComment(_schema, "answer", null, "the answer")], [], [])), TestContext.Current.CancellationToken);
+            [new SetRoutineComment(_schema, "answer", null, "the answer", RoutineKind.Function)], [], [])), TestContext.Current.CancellationToken);
         (await ScalarString(commentSql)).ShouldBe("the answer");
 
         // ...and clear.
         await _executor.Execute(_generator.Generate(new MigrationPlan(
-            [new SetFunctionComment(_schema, "answer", "the answer", null)], [], [])), TestContext.Current.CancellationToken);
+            [new SetRoutineComment(_schema, "answer", "the answer", null, RoutineKind.Function)], [], [])), TestContext.Current.CancellationToken);
         (await ScalarBool($"SELECT ({commentSql}) IS NULL")).ShouldBeTrue();
     }
 
@@ -939,7 +1220,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
 
         // Act
         await _executor.Execute(_generator.Generate(new MigrationPlan(
-            [new DropFunction(_schema, "answer")], [], [])), TestContext.Current.CancellationToken);
+            [new DropRoutine(_schema, "answer", RoutineKind.Function)], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         var exists = await ScalarBool($"""
@@ -956,12 +1237,12 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
     {
         // Arrange
         await Exec($"""CREATE TABLE "{_schema}".audit (entry text)""");
-        var procedure = new Procedure("log_entry", "message text",
+        var procedure = new Routine("log_entry", RoutineKind.Procedure, "message text",
             $"""LANGUAGE sql AS $$ INSERT INTO "{_schema}".audit (entry) VALUES (message) $$""");
 
         // Act
         await _executor.Execute(_generator.Generate(new MigrationPlan(
-            [new CreateProcedure(_schema, procedure)], [], [])), TestContext.Current.CancellationToken);
+            [new CreateRoutine(_schema, procedure)], [], [])), TestContext.Current.CancellationToken);
 
         // Assert — the procedure exists and is callable.
         await Exec($"""CALL "{_schema}".log_entry('hello')""");
@@ -976,12 +1257,12 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
             CREATE PROCEDURE "{_schema}".noop(a integer) LANGUAGE sql AS $$ SELECT 1 $$;
             COMMENT ON PROCEDURE "{_schema}".noop IS 'does nothing';
             """);
-        var desired = new Procedure("noop", "a integer, b integer",
+        var desired = new Routine("noop", RoutineKind.Procedure, "a integer, b integer",
             "LANGUAGE sql AS $$ SELECT 1 $$", Comment: "does nothing");
 
         // Act
         await _executor.Execute(_generator.Generate(new MigrationPlan(
-            [new RecreateProcedure(_schema, desired)], [], [])), TestContext.Current.CancellationToken);
+            [new RecreateRoutine(_schema, desired)], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         var count = await ScalarString($"""
@@ -1001,7 +1282,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
 
         // Act
         await _executor.Execute(_generator.Generate(new MigrationPlan(
-            [new RenameProcedure(_schema, "old_noop", "noop")], [], [])), TestContext.Current.CancellationToken);
+            [new RenameRoutine(_schema, "old_noop", "noop", RoutineKind.Procedure)], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         await Exec($"""CALL "{_schema}".noop()""");
@@ -1016,12 +1297,12 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
 
         // Act + Assert — set...
         await _executor.Execute(_generator.Generate(new MigrationPlan(
-            [new SetProcedureComment(_schema, "noop", null, "does nothing")], [], [])), TestContext.Current.CancellationToken);
+            [new SetRoutineComment(_schema, "noop", null, "does nothing", RoutineKind.Procedure)], [], [])), TestContext.Current.CancellationToken);
         (await ScalarString(commentSql)).ShouldBe("does nothing");
 
         // ...and clear.
         await _executor.Execute(_generator.Generate(new MigrationPlan(
-            [new SetProcedureComment(_schema, "noop", "does nothing", null)], [], [])), TestContext.Current.CancellationToken);
+            [new SetRoutineComment(_schema, "noop", "does nothing", null, RoutineKind.Procedure)], [], [])), TestContext.Current.CancellationToken);
         (await ScalarBool($"SELECT ({commentSql}) IS NULL")).ShouldBeTrue();
     }
 
@@ -1033,7 +1314,7 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
 
         // Act
         await _executor.Execute(_generator.Generate(new MigrationPlan(
-            [new DropProcedure(_schema, "noop")], [], [])), TestContext.Current.CancellationToken);
+            [new DropRoutine(_schema, "noop", RoutineKind.Procedure)], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         var exists = await ScalarBool($"""
@@ -1103,17 +1384,17 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
         // Arrange — the argument list is the recreate trigger, so what was applied must read back verbatim.
         // (The definition reads back in the DB's canonical form — $function$ quoting, qualified names — which the
         // core reconciles by storing the DB-reported form, as with view bodies.)
-        var function = new Function("add_numbers", "a integer, b integer",
+        var function = new Routine("add_numbers", RoutineKind.Function, "a integer, b integer",
             "RETURNS integer LANGUAGE sql AS $$ SELECT a + b $$");
 
         // Act
         await _executor.Execute(_generator.Generate(new MigrationPlan(
-            [new CreateFunction(_schema, function)], [], [])), TestContext.Current.CancellationToken);
+            [new CreateRoutine(_schema, function)], [], [])), TestContext.Current.CancellationToken);
 
         // Assert
         var provider = new PostgresSchemaProvider(_dataSource);
         var introspected = (await provider.GetSchema([_schema], TestContext.Current.CancellationToken))
-            .Schemas[0].Functions.ShouldHaveSingleItem();
+            .Schemas[0].Routines.ShouldHaveSingleItem();
         introspected.Name.ShouldBe("add_numbers");
         introspected.Arguments.ShouldBe("a integer, b integer");
         introspected.Definition.ShouldContain("SELECT a + b");

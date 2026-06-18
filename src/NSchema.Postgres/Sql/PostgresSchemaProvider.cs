@@ -3,6 +3,19 @@ using NpgsqlTypes;
 using NSchema.Postgres.Models;
 using NSchema.Schema;
 using NSchema.Schema.Model;
+using NSchema.Schema.Model.Columns;
+using NSchema.Schema.Model.CompositeTypes;
+using NSchema.Schema.Model.Constraints;
+using NSchema.Schema.Model.Domains;
+using NSchema.Schema.Model.Enums;
+using NSchema.Schema.Model.Extensions;
+using NSchema.Schema.Model.Indexes;
+using NSchema.Schema.Model.Routines;
+using NSchema.Schema.Model.Schemas;
+using NSchema.Schema.Model.Sequences;
+using NSchema.Schema.Model.Tables;
+using NSchema.Schema.Model.Triggers;
+using NSchema.Schema.Model.Views;
 
 namespace NSchema.Postgres.Sql;
 
@@ -24,7 +37,10 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         var foreignKeys = await QueryForeignKeys(conn, schemas, cancellationToken);
         var uniqueConstraints = await QueryUniqueConstraints(conn, schemas, cancellationToken);
         var checkConstraints = await QueryCheckConstraints(conn, schemas, cancellationToken);
+        var exclusionConstraints = await QueryExclusionConstraints(conn, schemas, cancellationToken);
         var indexes = await QueryIndexes(conn, schemas, cancellationToken);
+        var triggers = await QueryTriggers(conn, schemas, cancellationToken);
+        var extensions = await QueryExtensions(conn, cancellationToken);
         var schemaComments = await QuerySchemaComments(conn, schemas, cancellationToken);
         var tableComments = await QueryTableComments(conn, schemas, cancellationToken);
         var columnComments = await QueryColumnComments(conn, schemas, cancellationToken);
@@ -39,17 +55,23 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         var enumComments = await QueryEnumComments(conn, schemas, cancellationToken);
         var sequences = await QuerySequences(conn, schemas, cancellationToken);
         var sequenceComments = await QuerySequenceComments(conn, schemas, cancellationToken);
+        var domains = await QueryDomains(conn, schemas, cancellationToken);
+        var domainChecks = await QueryDomainChecks(conn, schemas, cancellationToken);
+        var compositeTypes = await QueryCompositeTypes(conn, schemas, cancellationToken);
+        var compositeFields = await QueryCompositeFields(conn, schemas, cancellationToken);
         var functions = await QueryRoutines(conn, schemas, FunctionKind, cancellationToken);
         var functionComments = await QueryRoutineComments(conn, schemas, FunctionKind, cancellationToken);
         var procedures = await QueryRoutines(conn, schemas, ProcedureKind, cancellationToken);
         var procedureComments = await QueryRoutineComments(conn, schemas, ProcedureKind, cancellationToken);
 
         return Build(
-            tables, columns, primaryKeys, foreignKeys, uniqueConstraints, checkConstraints, indexes,
+            tables, columns, primaryKeys, foreignKeys, uniqueConstraints, checkConstraints, exclusionConstraints, indexes, triggers,
             schemaComments, tableComments, columnComments, indexComments, constraintComments,
             schemaGrants, tableGrants, views, viewComments, viewDependencies,
             enums, enumComments, sequences, sequenceComments,
-            functions, functionComments, procedures, procedureComments
+            domains, domainChecks, compositeTypes, compositeFields,
+            functions, functionComments, procedures, procedureComments,
+            extensions
         );
     }
 
@@ -107,7 +129,8 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
                 c.is_identity,
                 seq.seqstart   AS identity_start,
                 seq.seqmin     AS identity_min_value,
-                seq.seqincrement AS identity_increment
+                seq.seqincrement AS identity_increment,
+                CASE WHEN c.is_generated = 'ALWAYS' THEN c.generation_expression END AS generation_expression
             FROM information_schema.columns c
             LEFT JOIN pg_class        t  ON t.relname   = c.table_name
                                         AND t.relkind   = 'r'
@@ -148,7 +171,8 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
                 IsIdentity: reader.GetString(12) == "YES",
                 IdentityStart: reader.IsDBNull(13) ? null : reader.GetInt64(13),
                 IdentityMinValue: reader.IsDBNull(14) ? null : reader.GetInt64(14),
-                IdentityIncrement: reader.IsDBNull(15) ? null : reader.GetInt64(15)
+                IdentityIncrement: reader.IsDBNull(15) ? null : reader.GetInt64(15),
+                GeneratedExpression: reader.IsDBNull(16) ? null : reader.GetString(16)
             ));
         }
 
@@ -367,6 +391,318 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         return expression[1..^1].Trim();
     }
 
+    private static async Task<List<ExclusionConstraintRow>> QueryExclusionConstraints(NpgsqlConnection conn, string[]? schemas, CancellationToken ct)
+    {
+        var rows = new List<ExclusionConstraintRow>();
+        await using var cmd = conn.CreateCommand();
+        // Exclusion constraints (contype = 'x'). Each is backed by an index (conindid): the index supplies the
+        // access method and the per-element column/expression text (read the same way as a plain index), while
+        // conexclop supplies the parallel operator for each element. The conexclop unnest joins on position, so it
+        // naturally restricts to the key elements (any INCLUDE columns have no operator and drop out). The access
+        // method is btree-folded to null so an EXCLUDE without USING round-trips clean.
+        cmd.CommandText = """
+            SELECT
+                n.nspname AS table_schema,
+                t.relname AS table_name,
+                c.conname AS constraint_name,
+                NULLIF(am.amname, 'btree') AS method,
+                pg_get_expr(ix.indpred, ix.indrelid) AS predicate,
+                array_agg(CASE WHEN k.attnum = 0 THEN pg_get_indexdef(c.conindid, k.ordinality::int, true) ELSE a.attname END ORDER BY k.ordinality) AS element_texts,
+                array_agg(k.attnum = 0 ORDER BY k.ordinality) AS is_expressions,
+                array_agg(op.oprname ORDER BY k.ordinality) AS operators
+            FROM pg_constraint c
+            JOIN pg_class     t  ON t.oid = c.conrelid
+            JOIN pg_namespace n  ON n.oid = t.relnamespace
+            JOIN pg_index     ix ON ix.indexrelid = c.conindid
+            JOIN pg_class     i  ON i.oid = c.conindid
+            JOIN pg_am        am ON am.oid = i.relam
+            JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS k(attnum, ordinality) ON TRUE
+            LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
+            JOIN LATERAL unnest(c.conexclop) WITH ORDINALITY AS e(opoid, eord) ON e.eord = k.ordinality
+            JOIN pg_operator op ON op.oid = e.opoid
+            WHERE c.contype = 'x'
+            AND (@schemas::text[] IS NULL OR n.nspname = ANY(@schemas))
+            AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+            AND n.nspname NOT LIKE 'pg\_toast%' ESCAPE '\'
+            AND n.nspname NOT LIKE 'pg\_temp%' ESCAPE '\'
+            GROUP BY n.nspname, t.relname, c.conname, am.amname, ix.indpred, ix.indrelid, c.conindid
+            ORDER BY n.nspname, t.relname, c.conname
+            """;
+        AddSchemasParameter(cmd, schemas);
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows.Add(new ExclusionConstraintRow(
+                TableSchema: reader.GetString(0),
+                TableName: reader.GetString(1),
+                ConstraintName: reader.GetString(2),
+                Method: reader.IsDBNull(3) ? null : reader.GetString(3),
+                Predicate: reader.IsDBNull(4) ? null : reader.GetString(4),
+                ElementTexts: reader.GetFieldValue<string[]>(5),
+                IsExpressions: reader.GetFieldValue<bool[]>(6),
+                Operators: reader.GetFieldValue<string[]>(7)
+            ));
+        }
+
+        return rows;
+    }
+
+    private static async Task<List<DomainRow>> QueryDomains(NpgsqlConnection conn, string[]? schemas, CancellationToken ct)
+    {
+        var rows = new List<DomainRow>();
+        await using var cmd = conn.CreateCommand();
+        // The base type (and its length/precision/scale) come from information_schema.domains — the same shape a
+        // column reports — so MapSqlType can be reused. NOT NULL is not exposed there, so it is read from
+        // pg_type.typnotnull; the comment is on the domain's type entry.
+        cmd.CommandText = """
+            SELECT
+                d.domain_schema,
+                d.domain_name,
+                d.data_type,
+                d.udt_name,
+                d.character_maximum_length,
+                d.numeric_precision,
+                d.numeric_scale,
+                t.typnotnull AS not_null,
+                d.domain_default,
+                obj_description(t.oid, 'pg_type') AS comment
+            FROM information_schema.domains d
+            JOIN pg_namespace n ON n.nspname = d.domain_schema
+            JOIN pg_type      t ON t.typname = d.domain_name AND t.typnamespace = n.oid AND t.typtype = 'd'
+            WHERE (@schemas::text[] IS NULL OR d.domain_schema = ANY(@schemas))
+            AND d.domain_schema NOT IN ('pg_catalog', 'information_schema')
+            AND d.domain_schema NOT LIKE 'pg\_toast%' ESCAPE '\'
+            AND d.domain_schema NOT LIKE 'pg\_temp%' ESCAPE '\'
+            ORDER BY d.domain_schema, d.domain_name
+            """;
+        AddSchemasParameter(cmd, schemas);
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows.Add(new DomainRow(
+                Schema: reader.GetString(0),
+                Name: reader.GetString(1),
+                DataType: reader.GetString(2),
+                UdtName: reader.GetString(3),
+                MaxLength: reader.IsDBNull(4) ? null : reader.GetInt32(4),
+                Precision: reader.IsDBNull(5) ? null : reader.GetInt32(5),
+                Scale: reader.IsDBNull(6) ? null : reader.GetInt32(6),
+                NotNull: reader.GetBoolean(7),
+                Default: reader.IsDBNull(8) ? null : reader.GetString(8),
+                Comment: reader.IsDBNull(9) ? null : reader.GetString(9)
+            ));
+        }
+
+        return rows;
+    }
+
+    private static async Task<List<DomainCheckRow>> QueryDomainChecks(NpgsqlConnection conn, string[]? schemas, CancellationToken ct)
+    {
+        var rows = new List<DomainCheckRow>();
+        await using var cmd = conn.CreateCommand();
+        // Domain check constraints are pg_constraint rows attached to the type (contypid), not a table (conrelid).
+        // pg_get_constraintdef renders "CHECK (expr)" — strip the wrapper, as for table checks.
+        cmd.CommandText = """
+            SELECT
+                n.nspname AS schema_name,
+                t.typname AS domain_name,
+                c.conname AS check_name,
+                pg_get_constraintdef(c.oid) AS definition
+            FROM pg_constraint c
+            JOIN pg_type      t ON t.oid = c.contypid
+            JOIN pg_namespace n ON n.oid = t.typnamespace
+            WHERE c.contype = 'c' AND c.contypid <> 0
+            AND (@schemas::text[] IS NULL OR n.nspname = ANY(@schemas))
+            AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+            AND n.nspname NOT LIKE 'pg\_toast%' ESCAPE '\'
+            AND n.nspname NOT LIKE 'pg\_temp%' ESCAPE '\'
+            ORDER BY n.nspname, t.typname, c.conname
+            """;
+        AddSchemasParameter(cmd, schemas);
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows.Add(new DomainCheckRow(
+                Schema: reader.GetString(0),
+                DomainName: reader.GetString(1),
+                CheckName: reader.GetString(2),
+                Expression: StripCheckWrapper(reader.GetString(3))
+            ));
+        }
+
+        return rows;
+    }
+
+    private static async Task<List<CompositeTypeRow>> QueryCompositeTypes(NpgsqlConnection conn, string[]? schemas, CancellationToken ct)
+    {
+        var rows = new List<CompositeTypeRow>();
+        await using var cmd = conn.CreateCommand();
+        // Standalone composite types only: every table/view/sequence also has a composite type in pg_type (its row
+        // type), so the backing pg_class is joined and filtered to relkind 'c' — a free-standing CREATE TYPE — to
+        // exclude those relation row types.
+        cmd.CommandText = """
+            SELECT n.nspname AS schema_name,
+                   t.typname AS type_name,
+                   obj_description(t.oid, 'pg_type') AS comment
+            FROM pg_type t
+            JOIN pg_namespace n ON n.oid = t.typnamespace
+            JOIN pg_class     c ON c.oid = t.typrelid
+            WHERE t.typtype = 'c' AND c.relkind = 'c'
+            AND (@schemas::text[] IS NULL OR n.nspname = ANY(@schemas))
+            AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+            AND n.nspname NOT LIKE 'pg\_toast%' ESCAPE '\'
+            AND n.nspname NOT LIKE 'pg\_temp%' ESCAPE '\'
+            ORDER BY n.nspname, t.typname
+            """;
+        AddSchemasParameter(cmd, schemas);
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows.Add(new CompositeTypeRow(
+                Schema: reader.GetString(0),
+                Name: reader.GetString(1),
+                Comment: reader.IsDBNull(2) ? null : reader.GetString(2)
+            ));
+        }
+
+        return rows;
+    }
+
+    private static async Task<List<CompositeFieldRow>> QueryCompositeFields(NpgsqlConnection conn, string[]? schemas, CancellationToken ct)
+    {
+        var rows = new List<CompositeFieldRow>();
+        await using var cmd = conn.CreateCommand();
+        // information_schema.attributes lists composite-type fields in the same shape a column reports, so
+        // MapSqlType can be reused for the field type.
+        cmd.CommandText = """
+            SELECT
+                a.udt_schema,
+                a.udt_name,
+                a.attribute_name,
+                a.ordinal_position,
+                a.data_type,
+                a.attribute_udt_name,
+                a.character_maximum_length,
+                a.numeric_precision,
+                a.numeric_scale
+            FROM information_schema.attributes a
+            WHERE (@schemas::text[] IS NULL OR a.udt_schema = ANY(@schemas))
+            AND a.udt_schema NOT IN ('pg_catalog', 'information_schema')
+            AND a.udt_schema NOT LIKE 'pg\_toast%' ESCAPE '\'
+            AND a.udt_schema NOT LIKE 'pg\_temp%' ESCAPE '\'
+            ORDER BY a.udt_schema, a.udt_name, a.ordinal_position
+            """;
+        AddSchemasParameter(cmd, schemas);
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows.Add(new CompositeFieldRow(
+                Schema: reader.GetString(0),
+                TypeName: reader.GetString(1),
+                FieldName: reader.GetString(2),
+                OrdinalPosition: reader.GetInt32(3),
+                DataType: reader.GetString(4),
+                UdtName: reader.GetString(5),
+                MaxLength: reader.IsDBNull(6) ? null : reader.GetInt32(6),
+                Precision: reader.IsDBNull(7) ? null : reader.GetInt32(7),
+                Scale: reader.IsDBNull(8) ? null : reader.GetInt32(8)
+            ));
+        }
+
+        return rows;
+    }
+
+    private static async Task<List<ExtensionRow>> QueryExtensions(NpgsqlConnection conn, CancellationToken ct)
+    {
+        var rows = new List<ExtensionRow>();
+        await using var cmd = conn.CreateCommand();
+        // Extensions are database-global (not schema-scoped), so they are not filtered by the schema list. plpgsql
+        // is the always-installed procedural language and never part of a declared schema, so it is excluded.
+        cmd.CommandText = """
+            SELECT e.extname AS name,
+                   e.extversion AS version,
+                   obj_description(e.oid, 'pg_extension') AS comment
+            FROM pg_extension e
+            WHERE e.extname <> 'plpgsql'
+            ORDER BY e.extname
+            """;
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows.Add(new ExtensionRow(
+                Name: reader.GetString(0),
+                Version: reader.IsDBNull(1) ? null : reader.GetString(1),
+                Comment: reader.IsDBNull(2) ? null : reader.GetString(2)
+            ));
+        }
+
+        return rows;
+    }
+
+    private static async Task<List<TriggerRow>> QueryTriggers(NpgsqlConnection conn, string[]? schemas, CancellationToken ct)
+    {
+        var rows = new List<TriggerRow>();
+        await using var cmd = conn.CreateCommand();
+        // User triggers only — NOT tgisinternal excludes the system triggers that enforce foreign keys and other
+        // constraints. tgtype is a bitmask (timing/level/events) decoded when mapped; the UPDATE OF column set comes
+        // from tgattr. The WHEN condition and the function arguments are both pulled out of pg_get_triggerdef (its
+        // canonical form): pg_get_expr cannot render a WHEN that references both OLD and NEW, and there is no clean
+        // catalog column for the decoded arguments.
+        cmd.CommandText = """
+            SELECT
+                n.nspname AS table_schema,
+                c.relname AS table_name,
+                t.tgname  AS trigger_name,
+                t.tgtype  AS tg_type,
+                fn.nspname || '.' || p.proname AS function,
+                substring(td.def FROM 'WHEN \((.*)\) EXECUTE (?:FUNCTION|PROCEDURE)') AS when_expr,
+                COALESCE(
+                    (SELECT array_agg(a.attname ORDER BY k.ord)
+                     FROM unnest(string_to_array(NULLIF(t.tgattr::text, ''), ' ')::int[]) WITH ORDINALITY AS k(attnum, ord)
+                     JOIN pg_attribute a ON a.attrelid = t.tgrelid AND a.attnum = k.attnum),
+                    ARRAY[]::text[]) AS update_of_columns,
+                substring(td.def FROM 'EXECUTE (?:FUNCTION|PROCEDURE) [^(]+\((.*)\)$') AS function_args,
+                obj_description(t.oid, 'pg_trigger') AS comment
+            FROM pg_trigger   t
+            JOIN pg_class     c  ON c.oid = t.tgrelid
+            JOIN pg_namespace n  ON n.oid = c.relnamespace
+            JOIN pg_proc      p  ON p.oid = t.tgfoid
+            JOIN pg_namespace fn ON fn.oid = p.pronamespace
+            CROSS JOIN LATERAL (SELECT pg_get_triggerdef(t.oid) AS def) td
+            WHERE NOT t.tgisinternal
+            AND (@schemas::text[] IS NULL OR n.nspname = ANY(@schemas))
+            AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+            AND n.nspname NOT LIKE 'pg\_toast%' ESCAPE '\'
+            AND n.nspname NOT LIKE 'pg\_temp%' ESCAPE '\'
+            ORDER BY n.nspname, c.relname, t.tgname
+            """;
+        AddSchemasParameter(cmd, schemas);
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows.Add(new TriggerRow(
+                TableSchema: reader.GetString(0),
+                TableName: reader.GetString(1),
+                Name: reader.GetString(2),
+                TgType: reader.GetInt16(3),
+                Function: reader.GetString(4),
+                When: reader.IsDBNull(5) ? null : StripEnclosingParens(reader.GetString(5)),
+                UpdateOfColumns: reader.GetFieldValue<string[]>(6),
+                FunctionArguments: reader.IsDBNull(7) || reader.GetString(7).Length == 0 ? null : reader.GetString(7),
+                Comment: reader.IsDBNull(8) ? null : reader.GetString(8)
+            ));
+        }
+
+        return rows;
+    }
+
     private static async Task<Dictionary<(string, string, string), string?>> QueryConstraintComments(NpgsqlConnection conn, string[]? schemas, CancellationToken ct)
     {
         var result = new Dictionary<(string, string, string), string?>();
@@ -402,29 +738,38 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         await using var cmd = conn.CreateCommand();
         // Exclude primary-key indexes and any index that backs a constraint (a UNIQUE constraint's implicit index
         // surfaces as a UniqueConstraint, not a TableIndex). Standalone CREATE UNIQUE INDEXes have no backing
-        // constraint, so they are still returned. Exclude expression indexes (attnum = 0).
+        // constraint, so they are still returned.
+        //
+        // Columns are read positionally (indkey order, all indnatts of them — keys then INCLUDE): a plain column
+        // is its attname; an expression key (attnum = 0) is its pg_get_indexdef text. indnkeyatts marks the
+        // key/INCLUDE split, indoption carries per-key ASC/DESC + NULLS bits, and the access method is btree-folded
+        // to null (the default) so a plain index round-trips clean.
         cmd.CommandText = """
             SELECT
                 n.nspname  AS schema_name,
                 t.relname  AS table_name,
                 i.relname  AS index_name,
                 ix.indisunique AS is_unique,
-                array_agg(a.attname ORDER BY k.ordinality) AS column_names,
-                pg_get_expr(ix.indpred, ix.indrelid) AS predicate
+                NULLIF(am.amname, 'btree') AS method,
+                ix.indnkeyatts AS num_key_atts,
+                pg_get_expr(ix.indpred, ix.indrelid) AS predicate,
+                array_agg(CASE WHEN k.attnum = 0 THEN pg_get_indexdef(ix.indexrelid, k.ordinality::int, true) ELSE a.attname END ORDER BY k.ordinality) AS column_texts,
+                array_agg(k.attnum = 0 ORDER BY k.ordinality) AS is_expressions,
+                array_agg(COALESCE((string_to_array(ix.indoption::text, ' '))[k.ordinality]::int, 0) ORDER BY k.ordinality) AS options
             FROM pg_index ix
             JOIN pg_class     t ON t.oid = ix.indrelid
             JOIN pg_class     i ON i.oid = ix.indexrelid
             JOIN pg_namespace n ON n.oid = t.relnamespace
+            JOIN pg_am        am ON am.oid = i.relam
             JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS k(attnum, ordinality) ON TRUE
-            JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
+            LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
             WHERE (@schemas::text[] IS NULL OR n.nspname = ANY(@schemas))
             AND n.nspname NOT IN ('pg_catalog', 'information_schema')
             AND n.nspname NOT LIKE 'pg\_toast%' ESCAPE '\'
             AND n.nspname NOT LIKE 'pg\_temp%' ESCAPE '\'
             AND NOT ix.indisprimary
             AND NOT EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = i.oid)
-            AND k.attnum > 0
-            GROUP BY n.nspname, t.relname, i.relname, ix.indisunique, ix.indpred, ix.indrelid
+            GROUP BY n.nspname, t.relname, i.relname, ix.indisunique, am.amname, ix.indnkeyatts, ix.indpred, ix.indrelid, ix.indexrelid
             ORDER BY n.nspname, t.relname, i.relname
             """;
         AddSchemasParameter(cmd, schemas);
@@ -437,8 +782,12 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
                 TableName: reader.GetString(1),
                 IndexName: reader.GetString(2),
                 IsUnique: reader.GetBoolean(3),
-                ColumnNames: reader.GetFieldValue<string[]>(4),
-                Predicate: reader.IsDBNull(5) ? null : reader.GetString(5)
+                Method: reader.IsDBNull(4) ? null : reader.GetString(4),
+                NumKeyAtts: reader.GetInt16(5),
+                Predicate: reader.IsDBNull(6) ? null : reader.GetString(6),
+                ColumnTexts: reader.GetFieldValue<string[]>(7),
+                IsExpressions: reader.GetFieldValue<bool[]>(8),
+                Options: reader.GetFieldValue<int[]>(9)
             ));
         }
 
@@ -627,15 +976,17 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
     {
         var rows = new List<ViewRow>();
         await using var cmd = conn.CreateCommand();
-        // relkind 'v' = plain views (materialized views, 'm', are not part of the model). pg_get_viewdef returns the
-        // canonical definition — this is what makes apply → plan round-trip cleanly: state captures the DB's own form.
+        // relkind 'v' = plain views, 'm' = materialized views (one model, distinguished by the flag). pg_get_viewdef
+        // returns the canonical definition for both — this is what makes apply → plan round-trip cleanly: state
+        // captures the DB's own form.
         cmd.CommandText = """
             SELECT n.nspname AS schema_name,
                    c.relname AS view_name,
-                   pg_get_viewdef(c.oid) AS definition
+                   pg_get_viewdef(c.oid) AS definition,
+                   c.relkind = 'm' AS is_materialized
             FROM pg_class c
             JOIN pg_namespace n ON n.oid = c.relnamespace
-            WHERE c.relkind = 'v'
+            WHERE c.relkind IN ('v', 'm')
             AND (@schemas::text[] IS NULL OR n.nspname = ANY(@schemas))
             AND n.nspname NOT IN ('pg_catalog', 'information_schema')
             AND n.nspname NOT LIKE 'pg\_toast%' ESCAPE '\'
@@ -647,7 +998,7 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
-            rows.Add(new ViewRow(reader.GetString(0), reader.GetString(1), CleanViewBody(reader.GetString(2))));
+            rows.Add(new ViewRow(reader.GetString(0), reader.GetString(1), CleanViewBody(reader.GetString(2)), reader.GetBoolean(3)));
         }
 
         return rows;
@@ -711,7 +1062,7 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
                                  AND dep.refclassid = 'pg_class'::regclass
             JOIN pg_class     d  ON d.oid  = dep.refobjid
             JOIN pg_namespace dn ON dn.oid = d.relnamespace
-            WHERE v.relkind = 'v'
+            WHERE v.relkind IN ('v', 'm')
             AND d.relkind IN ('r', 'v', 'm')
             AND d.oid <> v.oid
             AND (@schemas::text[] IS NULL OR vn.nspname = ANY(@schemas))
@@ -1016,7 +1367,9 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         List<ForeignKeyRow> foreignKeys,
         List<UniqueConstraintRow> uniqueConstraints,
         List<CheckConstraintRow> checkConstraints,
+        List<ExclusionConstraintRow> exclusionConstraints,
         List<IndexRow> indexes,
+        List<TriggerRow> triggers,
         Dictionary<string, string?> schemaComments,
         Dictionary<(string, string), string?> tableComments,
         Dictionary<(string, string, string), string?> columnComments,
@@ -1031,23 +1384,28 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         Dictionary<(string, string), string?> enumComments,
         List<SequenceRow> sequences,
         Dictionary<(string, string), string?> sequenceComments,
+        List<DomainRow> domains,
+        List<DomainCheckRow> domainChecks,
+        List<CompositeTypeRow> compositeTypes,
+        List<CompositeFieldRow> compositeFields,
         List<RoutineRow> functions,
         Dictionary<(string, string), string?> functionComments,
         List<RoutineRow> procedures,
-        Dictionary<(string, string), string?> procedureComments
+        Dictionary<(string, string), string?> procedureComments,
+        List<ExtensionRow> extensions
     )
     {
         var bySchema = tables
             .GroupBy(t => t.Schema)
             .ToDictionary(
                 g => g.Key,
-                g => g.Select(t => BuildTable(t, columns, primaryKeys, foreignKeys, uniqueConstraints, checkConstraints, indexes, tableComments, columnComments, indexComments, constraintComments, tableGrants)).ToList());
+                g => g.Select(t => BuildTable(t, columns, primaryKeys, foreignKeys, uniqueConstraints, checkConstraints, exclusionConstraints, indexes, triggers, tableComments, columnComments, indexComments, constraintComments, tableGrants)).ToList());
 
         var viewsBySchema = views
             .GroupBy(v => v.Schema)
             .ToDictionary(
                 g => g.Key,
-                g => g.Select(v => BuildView(v, viewComments, viewDependencies)).ToList());
+                g => g.Select(v => BuildView(v, viewComments, viewDependencies, indexes, indexComments)).ToList());
 
         var enumsBySchema = enums
             .GroupBy(e => e.Schema)
@@ -1063,19 +1421,24 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
                 g => g.Select(s => new Sequence(s.Name, NormalizeSequenceOptions(s), OldName: null,
                     Comment: sequenceComments.GetValueOrDefault((s.Schema, s.Name)))).ToList());
 
-        var functionsBySchema = functions
-            .GroupBy(f => f.Schema)
-            .ToDictionary(
-                g => g.Key,
-                g => g.Select(f => new Function(f.Name, f.Arguments, f.Definition, OldName: null,
-                    Comment: functionComments.GetValueOrDefault((f.Schema, f.Name)))).ToList());
+        // Functions and procedures are one model (Routine) distinguished by Kind, sharing a single name space, so
+        // the two query results merge into one routine list per schema.
+        var routinesBySchema = functions
+            .Select(f => (f.Schema, Routine: new Routine(f.Name, RoutineKind.Function, f.Arguments, f.Definition,
+                OldName: null, Comment: functionComments.GetValueOrDefault((f.Schema, f.Name)))))
+            .Concat(procedures
+                .Select(p => (p.Schema, Routine: new Routine(p.Name, RoutineKind.Procedure, p.Arguments, p.Definition,
+                    OldName: null, Comment: procedureComments.GetValueOrDefault((p.Schema, p.Name))))))
+            .GroupBy(x => x.Schema)
+            .ToDictionary(g => g.Key, g => g.Select(x => x.Routine).ToList());
 
-        var proceduresBySchema = procedures
-            .GroupBy(p => p.Schema)
-            .ToDictionary(
-                g => g.Key,
-                g => g.Select(p => new Procedure(p.Name, p.Arguments, p.Definition, OldName: null,
-                    Comment: procedureComments.GetValueOrDefault((p.Schema, p.Name)))).ToList());
+        var domainsBySchema = domains
+            .GroupBy(d => d.Schema)
+            .ToDictionary(g => g.Key, g => g.Select(d => MapDomain(d, domainChecks)).ToList());
+
+        var compositeTypesBySchema = compositeTypes
+            .GroupBy(c => c.Schema)
+            .ToDictionary(g => g.Key, g => g.Select(c => MapCompositeType(c, compositeFields)).ToList());
 
         // Drive schema list from what actually exists in the database, not from what was requested.
         var existingSchemas = schemaComments.Keys
@@ -1083,8 +1446,9 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
             .Union(viewsBySchema.Keys)
             .Union(enumsBySchema.Keys)
             .Union(sequencesBySchema.Keys)
-            .Union(functionsBySchema.Keys)
-            .Union(proceduresBySchema.Keys)
+            .Union(routinesBySchema.Keys)
+            .Union(domainsBySchema.Keys)
+            .Union(compositeTypesBySchema.Keys)
             .Union(schemaGrants.Select(g => g.SchemaName))
             .Distinct(StringComparer.OrdinalIgnoreCase);
 
@@ -1102,14 +1466,17 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
                     DroppedEnums: [],
                     Sequences: sequencesBySchema.GetValueOrDefault(name, []),
                     DroppedSequences: [],
-                    Functions: functionsBySchema.GetValueOrDefault(name, []),
-                    DroppedFunctions: [],
-                    Procedures: proceduresBySchema.GetValueOrDefault(name, []),
-                    DroppedProcedures: []);
+                    Routines: routinesBySchema.GetValueOrDefault(name, []),
+                    DroppedRoutines: [],
+                    Domains: domainsBySchema.GetValueOrDefault(name, []),
+                    DroppedDomains: [],
+                    CompositeTypes: compositeTypesBySchema.GetValueOrDefault(name, []),
+                    DroppedCompositeTypes: []);
             })
             .ToList();
 
-        return new DatabaseSchema(dbSchemas, []);
+        var dbExtensions = extensions.Select(e => new Extension(e.Name, e.Version, e.Comment)).ToList();
+        return new DatabaseSchema(dbSchemas, [], dbExtensions, []);
     }
 
     // Postgres engine defaults are folded to null so a bare "CREATE SEQUENCE" round-trips to an all-null
@@ -1145,14 +1512,28 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
     private static View BuildView(
         ViewRow row,
         Dictionary<(string, string), string?> viewComments,
-        List<ViewDependencyRow> viewDependencies)
+        List<ViewDependencyRow> viewDependencies,
+        List<IndexRow> allIndexes,
+        Dictionary<(string, string), string?> indexComments)
     {
         var dependsOn = viewDependencies
             .Where(d => d.ViewSchema == row.Schema && d.ViewName == row.Name)
             .Select(d => new ViewDependency(d.RefSchema, d.RefName))
             .ToList();
         viewComments.TryGetValue((row.Schema, row.Name), out var comment);
-        return new View(row.Name, row.Definition, OldName: null, Comment: comment, DependsOn: dependsOn);
+
+        // Only a materialized view can carry indexes; the same index rows that a table would consume are routed
+        // here when the relation they sit on is this matview (relation names are unique per schema, so there is no
+        // overlap with a table's indexes).
+        var indexes = row.IsMaterialized
+            ? allIndexes
+                .Where(i => i.SchemaName == row.Schema && i.TableName == row.Name)
+                .Select(i => MapIndex(i, indexComments.GetValueOrDefault((row.Schema, i.IndexName))))
+                .ToList()
+            : [];
+
+        return new View(row.Name, row.Definition, OldName: null, Comment: comment, DependsOn: dependsOn,
+            IsMaterialized: row.IsMaterialized, Indexes: indexes);
     }
 
     private static Table BuildTable(
@@ -1162,7 +1543,9 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         List<ForeignKeyRow> allForeignKeys,
         List<UniqueConstraintRow> allUniqueConstraints,
         List<CheckConstraintRow> allCheckConstraints,
+        List<ExclusionConstraintRow> allExclusionConstraints,
         List<IndexRow> allIndexes,
+        List<TriggerRow> allTriggers,
         Dictionary<(string, string), string?> tableComments,
         Dictionary<(string, string, string), string?> columnComments,
         Dictionary<(string, string), string?> indexComments,
@@ -1199,12 +1582,19 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
                 constraintComments.GetValueOrDefault((tableRow.Schema, tableRow.Name, c.ConstraintName))))
             .ToList();
 
+        var exclusions = allExclusionConstraints
+            .Where(e => e.TableSchema == tableRow.Schema && e.TableName == tableRow.Name)
+            .Select(e => MapExclusionConstraint(e, constraintComments.GetValueOrDefault((tableRow.Schema, tableRow.Name, e.ConstraintName))))
+            .ToList();
+
         var idxs = allIndexes
             .Where(i => i.SchemaName == tableRow.Schema && i.TableName == tableRow.Name)
-            .Select(i => new TableIndex(
-                i.IndexName, i.ColumnNames, i.IsUnique,
-                indexComments.GetValueOrDefault((tableRow.Schema, i.IndexName)),
-                i.Predicate))
+            .Select(i => MapIndex(i, indexComments.GetValueOrDefault((tableRow.Schema, i.IndexName))))
+            .ToList();
+
+        var triggers = allTriggers
+            .Where(t => t.TableSchema == tableRow.Schema && t.TableName == tableRow.Name)
+            .Select(MapTrigger)
             .ToList();
 
         tableComments.TryGetValue((tableRow.Schema, tableRow.Name), out var tableComment);
@@ -1224,12 +1614,116 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
             ForeignKeys: fks,
             UniqueConstraints: uniques,
             CheckConstraints: checks,
+            ExclusionConstraints: exclusions,
             Indexes: idxs,
-            Grants: grants
+            Grants: grants,
+            Triggers: triggers
         );
     }
 
+    // tgtype is a bitmask: bit 0 = ROW (else STATEMENT); bit 6 = INSTEAD OF, else bit 1 = BEFORE, else AFTER;
+    // bits 2/3/4/5 = INSERT/DELETE/UPDATE/TRUNCATE. The model's TriggerEvent flags differ from these bit values,
+    // so the events are translated rather than copied.
+    private static Trigger MapTrigger(TriggerRow row)
+    {
+        var timing = (row.TgType & 64) != 0 ? TriggerTiming.InsteadOf
+            : (row.TgType & 2) != 0 ? TriggerTiming.Before
+            : TriggerTiming.After;
+        var level = (row.TgType & 1) != 0 ? TriggerLevel.Row : TriggerLevel.Statement;
+
+        var events = TriggerEvent.None;
+        if ((row.TgType & 4) != 0)
+        {
+            events |= TriggerEvent.Insert;
+        }
+
+        if ((row.TgType & 8) != 0)
+        {
+            events |= TriggerEvent.Delete;
+        }
+
+        if ((row.TgType & 16) != 0)
+        {
+            events |= TriggerEvent.Update;
+        }
+
+        if ((row.TgType & 32) != 0)
+        {
+            events |= TriggerEvent.Truncate;
+        }
+
+        return new Trigger(row.Name, timing, events, row.Function, level,
+            UpdateOfColumns: row.UpdateOfColumns, When: row.When, FunctionArguments: row.FunctionArguments, Comment: row.Comment);
+    }
+
+    private static CompositeType MapCompositeType(CompositeTypeRow row, List<CompositeFieldRow> allFields)
+    {
+        var fields = allFields
+            .Where(f => f.Schema == row.Schema && f.TypeName == row.Name)
+            .OrderBy(f => f.OrdinalPosition)
+            .Select(f => new CompositeField(f.FieldName, MapSqlType(f.DataType, f.UdtName, domainSchema: null, domainName: null, f.MaxLength, f.Precision, f.Scale)))
+            .ToList();
+        return new CompositeType(row.Name, fields, OldName: null, Comment: row.Comment);
+    }
+
+    private static Domain MapDomain(DomainRow row, List<DomainCheckRow> allChecks)
+    {
+        var type = MapSqlType(row.DataType, row.UdtName, domainSchema: null, domainName: null, row.MaxLength, row.Precision, row.Scale);
+        var checks = allChecks
+            .Where(c => c.Schema == row.Schema && c.DomainName == row.Name)
+            .Select(c => new CheckConstraint(c.CheckName, c.Expression))
+            .ToList();
+        return new Domain(row.Name, type, row.Default, row.NotNull, checks, OldName: null, Comment: row.Comment);
+    }
+
+    private static ExclusionConstraint MapExclusionConstraint(ExclusionConstraintRow row, string? comment)
+    {
+        var elements = new List<ExclusionElement>();
+        for (var i = 0; i < row.ElementTexts.Length; i++)
+        {
+            elements.Add(new ExclusionElement(row.ElementTexts[i], row.Operators[i], row.IsExpressions[i]));
+        }
+
+        return new ExclusionConstraint(row.ConstraintName, elements, row.Method, row.Predicate, comment);
+    }
+
     // ── Mapping ───────────────────────────────────────────────────────────────
+
+    private static TableIndex MapIndex(IndexRow row, string? comment)
+    {
+        var keys = new List<IndexColumn>();
+        var include = new List<string>();
+        for (var i = 0; i < row.ColumnTexts.Length; i++)
+        {
+            if (i < row.NumKeyAtts)
+            {
+                var (sort, nulls) = DecodeIndexOption(row.Options[i]);
+                keys.Add(new IndexColumn(row.ColumnTexts[i], row.IsExpressions[i], sort, nulls));
+            }
+            else
+            {
+                // INCLUDE columns are always plain columns and carry no ordering.
+                include.Add(row.ColumnTexts[i]);
+            }
+        }
+
+        return new TableIndex(row.IndexName, keys, row.IsUnique, comment, row.Predicate, row.Method, include);
+    }
+
+    // indoption packs two bits per key: 0x01 = DESC, 0x02 = NULLS FIRST. The engine default is NULLS LAST for an
+    // ascending key and NULLS FIRST for a descending one (i.e. the default of the NULLS-FIRST bit equals the DESC
+    // bit), so a key matching that default normalizes to Default/Default and a plain index round-trips without
+    // phantom drift — only an explicitly non-default ordering surfaces.
+    private static (IndexSort Sort, IndexNulls Nulls) DecodeIndexOption(int option)
+    {
+        var descending = (option & 1) != 0;
+        var nullsFirst = (option & 2) != 0;
+        var sort = descending ? IndexSort.Descending : IndexSort.Default;
+        var nulls = nullsFirst == descending
+            ? IndexNulls.Default
+            : nullsFirst ? IndexNulls.First : IndexNulls.Last;
+        return (sort, nulls);
+    }
 
     private static Column MapColumn(ColumnRow row, Dictionary<(string, string, string), string?> columnComments)
     {
@@ -1238,7 +1732,7 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
         var identityOptions = row.IsIdentity
             ? new IdentityOptions(row.IdentityStart, row.IdentityMinValue, row.IdentityIncrement)
             : null;
-        return new Column(row.ColumnName, type, row.IsNullable, row.IsIdentity, row.DefaultExpression, null, comment, identityOptions);
+        return new Column(row.ColumnName, type, row.IsNullable, row.IsIdentity, row.DefaultExpression, null, comment, identityOptions, row.GeneratedExpression);
     }
 
     private static SqlType MapSqlType(string dataType, string udtName, string? domainSchema, string? domainName, int? maxLength, int? precision, int? scale)

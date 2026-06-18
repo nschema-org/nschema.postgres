@@ -1,7 +1,11 @@
 using Npgsql;
 using NSchema.Postgres.Sql;
 using NSchema.Postgres.Tests.Fixtures;
-using NSchema.Schema.Model;
+using NSchema.Schema.Model.Columns;
+using NSchema.Schema.Model.Routines;
+using NSchema.Schema.Model.Sequences;
+using NSchema.Schema.Model.Tables;
+using NSchema.Schema.Model.Views;
 
 namespace NSchema.Postgres.Tests.Sql;
 
@@ -359,7 +363,7 @@ public sealed class PostgresSchemaProviderTests(PostgresContainerFixture fixture
 
         // Assert
         idx.Name.ShouldBe("ix_users_email");
-        idx.ColumnNames.ShouldBe(["email"]);
+        idx.Columns.Select(c => c.Expression).ShouldBe(["email"]);
         idx.IsUnique.ShouldBeFalse();
     }
 
@@ -401,7 +405,7 @@ public sealed class PostgresSchemaProviderTests(PostgresContainerFixture fixture
             .Schemas[0].Tables[0].Indexes.Single();
 
         // Assert
-        idx.ColumnNames.ShouldBe(["user_id", "happened"]);
+        idx.Columns.Select(c => c.Expression).ShouldBe(["user_id", "happened"]);
     }
 
     [Fact]
@@ -897,7 +901,7 @@ public sealed class PostgresSchemaProviderTests(PostgresContainerFixture fixture
 
         // Act
         var function = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken))
-            .Schemas[0].Functions.ShouldHaveSingleItem();
+            .Schemas[0].Routines.ShouldHaveSingleItem();
 
         // Assert — both parts are the DB's canonical form: the argument list as pg_get_function_arguments renders
         // it, and the definition starting right after the CREATE header (at RETURNS).
@@ -920,7 +924,7 @@ public sealed class PostgresSchemaProviderTests(PostgresContainerFixture fixture
 
         // Act
         var function = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken))
-            .Schemas[0].Functions.ShouldHaveSingleItem();
+            .Schemas[0].Routines.ShouldHaveSingleItem();
 
         // Assert
         function.Arguments.ShouldStartWith("value text DEFAULT repeat(");
@@ -935,7 +939,7 @@ public sealed class PostgresSchemaProviderTests(PostgresContainerFixture fixture
 
         // Act
         var function = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken))
-            .Schemas[0].Functions.ShouldHaveSingleItem();
+            .Schemas[0].Routines.ShouldHaveSingleItem();
 
         // Assert
         function.Name.ShouldBe("GetAnswer");
@@ -954,7 +958,7 @@ public sealed class PostgresSchemaProviderTests(PostgresContainerFixture fixture
 
         // Act
         var function = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken))
-            .Schemas[0].Functions.ShouldHaveSingleItem();
+            .Schemas[0].Routines.ShouldHaveSingleItem();
 
         // Assert
         function.Comment.ShouldBe("the answer");
@@ -969,9 +973,9 @@ public sealed class PostgresSchemaProviderTests(PostgresContainerFixture fixture
         // Act
         var schema = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken)).Schemas[0];
 
-        // Assert — prokind separates the two sets; a procedure must not leak into Functions.
-        schema.Functions.ShouldBeEmpty();
-        var procedure = schema.Procedures.ShouldHaveSingleItem();
+        // Assert — prokind is carried as Routine.Kind; a procedure must be tagged Procedure, not Function.
+        var procedure = schema.Routines.ShouldHaveSingleItem();
+        procedure.Kind.ShouldBe(RoutineKind.Procedure);
         procedure.Name.ShouldBe("noop");
         procedure.Arguments.ShouldBe("a integer");
         procedure.Definition.ShouldStartWith("LANGUAGE sql");
@@ -989,9 +993,10 @@ public sealed class PostgresSchemaProviderTests(PostgresContainerFixture fixture
 
         // Act
         var procedure = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken))
-            .Schemas[0].Procedures.ShouldHaveSingleItem();
+            .Schemas[0].Routines.ShouldHaveSingleItem();
 
         // Assert
+        procedure.Kind.ShouldBe(RoutineKind.Procedure);
         procedure.Comment.ShouldBe("does nothing");
     }
 
@@ -1007,8 +1012,7 @@ public sealed class PostgresSchemaProviderTests(PostgresContainerFixture fixture
             .Schemas.Single(s => s.Name == "public");
 
         // Assert
-        publicSchema.Functions.ShouldBeEmpty();
-        publicSchema.Procedures.ShouldBeEmpty();
+        publicSchema.Routines.ShouldBeEmpty();
     }
 
     [Fact]
@@ -1021,7 +1025,21 @@ public sealed class PostgresSchemaProviderTests(PostgresContainerFixture fixture
         var schema = (await _sut.GetSchema([_schema], TestContext.Current.CancellationToken)).Schemas[0];
 
         // Assert
-        schema.Functions.ShouldBeEmpty();
-        schema.Procedures.ShouldBeEmpty();
+        schema.Routines.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task GetSchema_Extensions_AreReportedAtRootWithVersion()
+    {
+        // Arrange — the fixture enables citext database-wide; extensions are global, so a schema-scoped read still
+        // surfaces them at the root. plpgsql (the always-present default) is excluded.
+
+        // Act
+        var schema = await _sut.GetSchema([_schema], TestContext.Current.CancellationToken);
+
+        // Assert
+        var citext = schema.Extensions.Single(e => e.Name == "citext");
+        citext.Version.ShouldNotBeNull();
+        schema.Extensions.ShouldNotContain(e => e.Name == "plpgsql");
     }
 }

@@ -1,5 +1,28 @@
+using System.Text;
 using NSchema.Plan.Model;
-using NSchema.Schema.Model;
+using NSchema.Plan.Model.Columns;
+using NSchema.Plan.Model.CompositeTypes;
+using NSchema.Plan.Model.Constraints;
+using NSchema.Plan.Model.Domains;
+using NSchema.Plan.Model.Enums;
+using NSchema.Plan.Model.Extensions;
+using NSchema.Plan.Model.Indexes;
+using NSchema.Plan.Model.Routines;
+using NSchema.Plan.Model.Schemas;
+using NSchema.Plan.Model.Sequence;
+using NSchema.Plan.Model.Tables;
+using NSchema.Plan.Model.Triggers;
+using NSchema.Plan.Model.Views;
+using NSchema.Schema.Model.Columns;
+using NSchema.Schema.Model.CompositeTypes;
+using NSchema.Schema.Model.Constraints;
+using NSchema.Schema.Model.Domains;
+using NSchema.Schema.Model.Extensions;
+using NSchema.Schema.Model.Indexes;
+using NSchema.Schema.Model.Routines;
+using NSchema.Schema.Model.Sequences;
+using NSchema.Schema.Model.Tables;
+using NSchema.Schema.Model.Triggers;
 using NSchema.Sql;
 using NSchema.Sql.Model;
 
@@ -24,8 +47,8 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
         // the statement is carved out of the surrounding transaction. The executor commits the pending segment,
         // runs it alone, and resumes — ordering relative to later statements that use the value is preserved.
         AddEnumValue x => [new SqlStatement(BuildAddEnumValue(x), RunOutsideTransaction: true)],
-        RecreateFunction x => BuildRecreateRoutine("FUNCTION", x.SchemaName, x.Function.Name, x.Function.Arguments, x.Function.Definition, x.Function.Comment),
-        RecreateProcedure x => BuildRecreateRoutine("PROCEDURE", x.SchemaName, x.Procedure.Name, x.Procedure.Arguments, x.Procedure.Definition, x.Procedure.Comment),
+        RecreateRoutine x => BuildRecreateRoutine(RoutineKeyword(x.Routine.Kind), x.SchemaName, x.Routine.Name, x.Routine.Arguments, x.Routine.Definition, x.Routine.Comment),
+        RecreateDomain x => BuildRecreateDomain(x),
         _ => [new SqlStatement(GenerateSql(action))],
     };
 
@@ -46,6 +69,7 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
         AlterIdentitySequence x => BuildAlterIdentitySequence(x),
         SetColumnDefault { NewDefault: null } x => $"""ALTER TABLE "{x.SchemaName}"."{x.TableName}" ALTER COLUMN "{x.ColumnName}" DROP DEFAULT""",
         SetColumnDefault x => $"""ALTER TABLE "{x.SchemaName}"."{x.TableName}" ALTER COLUMN "{x.ColumnName}" SET DEFAULT {x.NewDefault}""",
+        SetColumnGenerated x => BuildSetColumnGenerated(x),
         AddPrimaryKey x => $"""ALTER TABLE "{x.SchemaName}"."{x.TableName}" ADD CONSTRAINT "{x.PrimaryKey.Name}" PRIMARY KEY ({ColList(x.PrimaryKey.ColumnNames)})""",
         DropPrimaryKey x => $"ALTER TABLE \"{x.SchemaName}\".\"{x.TableName}\" DROP CONSTRAINT \"{x.PrimaryKeyName}\"",
         AddForeignKey x => BuildAddForeignKey(x),
@@ -54,23 +78,55 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
         DropUniqueConstraint x => $"ALTER TABLE \"{x.SchemaName}\".\"{x.TableName}\" DROP CONSTRAINT \"{x.ConstraintName}\"",
         AddCheckConstraint x => $"""ALTER TABLE "{x.SchemaName}"."{x.TableName}" ADD CONSTRAINT "{x.CheckConstraint.Name}" CHECK ({x.CheckConstraint.Expression})""",
         DropCheckConstraint x => $"ALTER TABLE \"{x.SchemaName}\".\"{x.TableName}\" DROP CONSTRAINT \"{x.ConstraintName}\"",
+        AddExclusionConstraint x => BuildAddExclusionConstraint(x),
+        DropExclusionConstraint x => $"ALTER TABLE \"{x.SchemaName}\".\"{x.TableName}\" DROP CONSTRAINT \"{x.ConstraintName}\"",
         CreateIndex x => BuildCreateIndex(x),
         DropIndex x => $"DROP INDEX \"{x.SchemaName}\".\"{x.IndexName}\"",
+        CreateTrigger x => BuildCreateTrigger(x),
+        DropTrigger x => $"DROP TRIGGER \"{x.TriggerName}\" ON \"{x.SchemaName}\".\"{x.TableName}\"",
+        SetTriggerComment x => x.NewComment is null
+            ? $"""COMMENT ON TRIGGER "{x.TriggerName}" ON "{x.SchemaName}"."{x.TableName}" IS NULL"""
+            : $"""COMMENT ON TRIGGER "{x.TriggerName}" ON "{x.SchemaName}"."{x.TableName}" IS $comment${x.NewComment}$comment$""",
         // A view Add and a body Modify both arrive as CreateView; CREATE OR REPLACE serves both. An incompatible
         // output-column change (rename/drop/retype/reorder) is rejected loudly by Postgres rather than silently
         // dropping dependents — see CLAUDE.md / the core view-body decision.
+        // A materialized view has no CREATE OR REPLACE form, so the core plans a body change as drop + recreate;
+        // CreateView for a matview is therefore always a fresh CREATE MATERIALIZED VIEW. A plain view's body
+        // change is an in-place CREATE OR REPLACE.
+        CreateView { View.IsMaterialized: true } x => $"""CREATE MATERIALIZED VIEW "{x.SchemaName}"."{x.View.Name}" AS {x.View.Body}""",
         CreateView x => $"""CREATE OR REPLACE VIEW "{x.SchemaName}"."{x.View.Name}" AS {x.View.Body}""",
-        DropView x => $"DROP VIEW \"{x.SchemaName}\".\"{x.ViewName}\"",
-        RenameView x => $"ALTER VIEW \"{x.SchemaName}\".\"{x.OldName}\" RENAME TO \"{x.NewName}\"",
+        DropView x => $"DROP {ViewKind(x.IsMaterialized)} \"{x.SchemaName}\".\"{x.ViewName}\"",
+        RenameView x => $"ALTER {ViewKind(x.IsMaterialized)} \"{x.SchemaName}\".\"{x.OldName}\" RENAME TO \"{x.NewName}\"",
         SetViewComment x => x.NewComment is null
-            ? $"""COMMENT ON VIEW "{x.SchemaName}"."{x.ViewName}" IS NULL"""
-            : $"""COMMENT ON VIEW "{x.SchemaName}"."{x.ViewName}" IS $comment${x.NewComment}$comment$""",
+            ? $"""COMMENT ON {ViewKind(x.IsMaterialized)} "{x.SchemaName}"."{x.ViewName}" IS NULL"""
+            : $"""COMMENT ON {ViewKind(x.IsMaterialized)} "{x.SchemaName}"."{x.ViewName}" IS $comment${x.NewComment}$comment$""",
         CreateEnum x => BuildCreateEnum(x),
         DropEnum x => $"DROP TYPE \"{x.SchemaName}\".\"{x.EnumName}\"",
         RenameEnum x => $"ALTER TYPE \"{x.SchemaName}\".\"{x.OldName}\" RENAME TO \"{x.NewName}\"",
         SetEnumComment x => x.NewComment is null
             ? $"""COMMENT ON TYPE "{x.SchemaName}"."{x.EnumName}" IS NULL"""
             : $"""COMMENT ON TYPE "{x.SchemaName}"."{x.EnumName}" IS $comment${x.NewComment}$comment$""",
+        CreateDomain x => BuildCreateDomain(x.SchemaName, x.Domain),
+        DropDomain x => $"DROP DOMAIN \"{x.SchemaName}\".\"{x.DomainName}\"",
+        RenameDomain x => $"ALTER DOMAIN \"{x.SchemaName}\".\"{x.OldName}\" RENAME TO \"{x.NewName}\"",
+        AlterDomainDefault { NewDefault: null } x => $"""ALTER DOMAIN "{x.SchemaName}"."{x.DomainName}" DROP DEFAULT""",
+        AlterDomainDefault x => $"""ALTER DOMAIN "{x.SchemaName}"."{x.DomainName}" SET DEFAULT {x.NewDefault}""",
+        AlterDomainNotNull { NotNull: true } x => $"""ALTER DOMAIN "{x.SchemaName}"."{x.DomainName}" SET NOT NULL""",
+        AlterDomainNotNull x => $"""ALTER DOMAIN "{x.SchemaName}"."{x.DomainName}" DROP NOT NULL""",
+        AddDomainCheck x => $"""ALTER DOMAIN "{x.SchemaName}"."{x.DomainName}" ADD CONSTRAINT "{x.Check.Name}" CHECK ({x.Check.Expression})""",
+        DropDomainCheck x => $"ALTER DOMAIN \"{x.SchemaName}\".\"{x.DomainName}\" DROP CONSTRAINT \"{x.CheckName}\"",
+        SetDomainComment x => x.NewComment is null
+            ? $"""COMMENT ON DOMAIN "{x.SchemaName}"."{x.DomainName}" IS NULL"""
+            : $"""COMMENT ON DOMAIN "{x.SchemaName}"."{x.DomainName}" IS $comment${x.NewComment}$comment$""",
+        CreateCompositeType x => BuildCreateCompositeType(x),
+        DropCompositeType x => $"DROP TYPE \"{x.SchemaName}\".\"{x.TypeName}\"",
+        RenameCompositeType x => $"ALTER TYPE \"{x.SchemaName}\".\"{x.OldName}\" RENAME TO \"{x.NewName}\"",
+        SetCompositeTypeComment x => x.NewComment is null
+            ? $"""COMMENT ON TYPE "{x.SchemaName}"."{x.TypeName}" IS NULL"""
+            : $"""COMMENT ON TYPE "{x.SchemaName}"."{x.TypeName}" IS $comment${x.NewComment}$comment$""",
+        AddCompositeField x => $"""ALTER TYPE "{x.SchemaName}"."{x.TypeName}" ADD ATTRIBUTE "{x.Field.Name}" {ToPostgresType(x.Field.DataType)}""",
+        DropCompositeField x => $"ALTER TYPE \"{x.SchemaName}\".\"{x.TypeName}\" DROP ATTRIBUTE \"{x.FieldName}\"",
+        AlterCompositeFieldType x => $"""ALTER TYPE "{x.SchemaName}"."{x.TypeName}" ALTER ATTRIBUTE "{x.FieldName}" TYPE {ToPostgresType(x.NewType)}""",
         CreateSequence x => BuildCreateSequence(x),
         DropSequence x => $"DROP SEQUENCE \"{x.SchemaName}\".\"{x.SequenceName}\"",
         RenameSequence x => $"ALTER SEQUENCE \"{x.SchemaName}\".\"{x.OldName}\" RENAME TO \"{x.NewName}\"",
@@ -78,21 +134,17 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
         SetSequenceComment x => x.NewComment is null
             ? $"""COMMENT ON SEQUENCE "{x.SchemaName}"."{x.SequenceName}" IS NULL"""
             : $"""COMMENT ON SEQUENCE "{x.SchemaName}"."{x.SequenceName}" IS $comment${x.NewComment}$comment$""",
-        // A routine Add and a definition-only Modify both arrive as Create; CREATE OR REPLACE serves both. The model
-        // has no overloading (one routine per name), so drops, renames and comments omit the signature — Postgres
-        // resolves the bare name, and rejects it loudly if an out-of-model overload makes it ambiguous.
-        CreateFunction x => $"""CREATE OR REPLACE FUNCTION "{x.SchemaName}"."{x.Function.Name}"({x.Function.Arguments}) {x.Function.Definition}""",
-        DropFunction x => $"DROP FUNCTION \"{x.SchemaName}\".\"{x.FunctionName}\"",
-        RenameFunction x => $"ALTER FUNCTION \"{x.SchemaName}\".\"{x.OldName}\" RENAME TO \"{x.NewName}\"",
-        SetFunctionComment x => x.NewComment is null
-            ? $"""COMMENT ON FUNCTION "{x.SchemaName}"."{x.FunctionName}" IS NULL"""
-            : $"""COMMENT ON FUNCTION "{x.SchemaName}"."{x.FunctionName}" IS $comment${x.NewComment}$comment$""",
-        CreateProcedure x => $"""CREATE OR REPLACE PROCEDURE "{x.SchemaName}"."{x.Procedure.Name}"({x.Procedure.Arguments}) {x.Procedure.Definition}""",
-        DropProcedure x => $"DROP PROCEDURE \"{x.SchemaName}\".\"{x.ProcedureName}\"",
-        RenameProcedure x => $"ALTER PROCEDURE \"{x.SchemaName}\".\"{x.OldName}\" RENAME TO \"{x.NewName}\"",
-        SetProcedureComment x => x.NewComment is null
-            ? $"""COMMENT ON PROCEDURE "{x.SchemaName}"."{x.ProcedureName}" IS NULL"""
-            : $"""COMMENT ON PROCEDURE "{x.SchemaName}"."{x.ProcedureName}" IS $comment${x.NewComment}$comment$""",
+        // A routine Add and a definition-only Modify both arrive as CreateRoutine; CREATE OR REPLACE serves both.
+        // Functions and procedures are one model distinguished by Kind, so a single set of actions carries the
+        // keyword. The model has no overloading (one routine per name), so drops, renames and comments omit the
+        // signature — Postgres resolves the bare name, and rejects it loudly if an out-of-model overload makes it
+        // ambiguous.
+        CreateRoutine x => $"""CREATE OR REPLACE {RoutineKeyword(x.Routine.Kind)} "{x.SchemaName}"."{x.Routine.Name}"({x.Routine.Arguments}) {x.Routine.Definition}""",
+        DropRoutine x => $"DROP {RoutineKeyword(x.Kind)} \"{x.SchemaName}\".\"{x.RoutineName}\"",
+        RenameRoutine x => $"ALTER {RoutineKeyword(x.Kind)} \"{x.SchemaName}\".\"{x.OldName}\" RENAME TO \"{x.NewName}\"",
+        SetRoutineComment x => x.NewComment is null
+            ? $"""COMMENT ON {RoutineKeyword(x.Kind)} "{x.SchemaName}"."{x.RoutineName}" IS NULL"""
+            : $"""COMMENT ON {RoutineKeyword(x.Kind)} "{x.SchemaName}"."{x.RoutineName}" IS $comment${x.NewComment}$comment$""",
         SetSchemaComment x => x.NewComment is null
             ? $"""COMMENT ON SCHEMA "{x.SchemaName}" IS NULL"""
             : $"""COMMENT ON SCHEMA "{x.SchemaName}" IS $comment${x.NewComment}$comment$""",
@@ -108,6 +160,14 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
         SetConstraintComment x => x.NewComment is null
             ? $"""COMMENT ON CONSTRAINT "{x.ConstraintName}" ON "{x.SchemaName}"."{x.TableName}" IS NULL"""
             : $"""COMMENT ON CONSTRAINT "{x.ConstraintName}" ON "{x.SchemaName}"."{x.TableName}" IS $comment${x.NewComment}$comment$""",
+        CreateExtension x => BuildCreateExtension(x),
+        // A version change updates in place; with no target version, UPDATE moves to the default (latest) version.
+        AlterExtension { NewVersion: { } v } x => $"""ALTER EXTENSION "{x.ExtensionName}" UPDATE TO '{EscapeLiteral(v)}'""",
+        AlterExtension x => $"""ALTER EXTENSION "{x.ExtensionName}" UPDATE""",
+        DropExtension x => $"DROP EXTENSION \"{x.ExtensionName}\"",
+        SetExtensionComment x => x.NewComment is null
+            ? $"""COMMENT ON EXTENSION "{x.ExtensionName}" IS NULL"""
+            : $"""COMMENT ON EXTENSION "{x.ExtensionName}" IS $comment${x.NewComment}$comment$""",
         GrantSchemaUsage x => $"""GRANT USAGE ON SCHEMA "{x.SchemaName}" TO {x.Role}""",
         RevokeSchemaUsage x => $"""REVOKE USAGE ON SCHEMA "{x.SchemaName}" FROM {x.Role}""",
         GrantTablePrivileges x => $"""GRANT {PrivilegeList(x.Privileges)} ON TABLE "{x.SchemaName}"."{x.TableName}" TO {x.Role}""",
@@ -133,6 +193,23 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
             """;
     }
 
+    private static string BuildAddExclusionConstraint(AddExclusionConstraint x)
+    {
+        var ex = x.ExclusionConstraint;
+        var method = ex.Method is { } m ? $" USING {m}" : "";
+        var elements = string.Join(", ", ex.Elements.Select(ExclusionElementText));
+        var where = ex.Predicate is { } p ? $" WHERE ({p})" : "";
+        return $"""ALTER TABLE "{x.SchemaName}"."{x.TableName}" ADD CONSTRAINT "{ex.Name}" EXCLUDE{method} ({elements}){where}""";
+    }
+
+    // A plain column element is quoted; an expression element is parenthesised and verbatim. The operator follows
+    // WITH (e.g. =, &&) and needs no quoting.
+    private static string ExclusionElementText(ExclusionElement element)
+    {
+        var target = element.IsExpression ? $"({element.Expression})" : $"\"{element.Expression}\"";
+        return $"{target} WITH {element.Operator}";
+    }
+
     private static string BuildAddForeignKey(AddForeignKey x)
     {
         var fk = x.ForeignKey;
@@ -143,8 +220,33 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
 
     private static string BuildCreateIndex(CreateIndex x)
     {
-        var sql = $"""CREATE {(x.Index.IsUnique ? "UNIQUE " : "")}INDEX "{x.Index.Name}" ON "{x.SchemaName}"."{x.TableName}" ({ColList(x.Index.ColumnNames)})""";
-        return x.Index.Predicate is { } pred ? $"{sql} WHERE {pred}" : sql;
+        var idx = x.Index;
+        var method = idx.Method is { } m ? $" USING {m}" : "";
+        var keys = string.Join(", ", idx.Columns.Select(IndexKeyText));
+        var include = idx.Include.Count > 0 ? $" INCLUDE ({ColList(idx.Include)})" : "";
+        var sql = $"""CREATE {(idx.IsUnique ? "UNIQUE " : "")}INDEX "{idx.Name}" ON "{x.SchemaName}"."{x.TableName}"{method} ({keys}){include}""";
+        return idx.Predicate is { } pred ? $"{sql} WHERE {pred}" : sql;
+    }
+
+    // A plain column key is quoted; an expression key is emitted parenthesised and verbatim. ASC/DESC and
+    // NULLS FIRST/LAST are rendered only when explicit (IndexSort/IndexNulls.Default omits them, letting the
+    // engine default stand so the index introspects back without drift).
+    private static string IndexKeyText(IndexColumn col)
+    {
+        var key = col.IsExpression ? $"({col.Expression})" : $"\"{col.Expression}\"";
+        var sort = col.Sort switch
+        {
+            IndexSort.Ascending => " ASC",
+            IndexSort.Descending => " DESC",
+            _ => "",
+        };
+        var nulls = col.Nulls switch
+        {
+            IndexNulls.First => " NULLS FIRST",
+            IndexNulls.Last => " NULLS LAST",
+            _ => "",
+        };
+        return $"{key}{sort}{nulls}";
     }
 
     private static string BuildColumnDef(Column col)
@@ -153,7 +255,9 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
         var nullable = col.IsNullable ? "" : " NOT NULL";
         var identity = col.IsIdentity ? BuildIdentityClause(col.IdentityOptions) : "";
         var def = col is { DefaultExpression: { } d, IsIdentity: false } ? $" DEFAULT {d}" : "";
-        return $"\"{col.Name}\" {type}{nullable}{identity}{def}";
+        // A generated column is mutually exclusive with a default (the core's structural policy enforces this).
+        var generated = col.GeneratedExpression is { } g ? $" GENERATED ALWAYS AS ({g}) STORED" : "";
+        return $"\"{col.Name}\" {type}{nullable}{identity}{def}{generated}";
     }
 
     private static string BuildIdentityClause(IdentityOptions? options)
@@ -327,6 +431,109 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
             yield return new SqlStatement($"""COMMENT ON {kind} "{schemaName}"."{name}" IS $comment${comment}$comment$""");
         }
     }
+
+    // Changing a column's generation expression in place: PG 17+ replaces it with SET EXPRESSION, and a generated
+    // column is converted back to a plain one with DROP EXPRESSION (data is kept). PostgreSQL has no in-place way
+    // to make an existing plain column generated, so that transition is rejected — the column must be re-added.
+    private static string BuildSetColumnGenerated(SetColumnGenerated x) => x switch
+    {
+        { NewExpression: null } => $"""ALTER TABLE "{x.SchemaName}"."{x.TableName}" ALTER COLUMN "{x.ColumnName}" DROP EXPRESSION""",
+        { OldExpression: not null, NewExpression: { } expr } => $"""ALTER TABLE "{x.SchemaName}"."{x.TableName}" ALTER COLUMN "{x.ColumnName}" SET EXPRESSION AS ({expr})""",
+        _ => throw new NotSupportedException(
+            $"""Cannot make existing column "{x.SchemaName}"."{x.TableName}"."{x.ColumnName}" generated in place; PostgreSQL has no ADD GENERATED — drop and re-add the column."""),
+    };
+
+    private static string BuildCreateCompositeType(CreateCompositeType x)
+    {
+        var fields = string.Join(", ", x.CompositeType.Fields.Select(f => $"\"{f.Name}\" {ToPostgresType(f.DataType)}"));
+        return $"""CREATE TYPE "{x.SchemaName}"."{x.CompositeType.Name}" AS ({fields})""";
+    }
+
+    // CREATE DOMAIN name AS type [DEFAULT expr] [NOT NULL] [CONSTRAINT n CHECK (expr)]…
+    private static string BuildCreateDomain(string schema, Domain domain)
+    {
+        var sb = new StringBuilder($"""CREATE DOMAIN "{schema}"."{domain.Name}" AS {ToPostgresType(domain.DataType)}""");
+        if (domain.Default is { } def)
+        {
+            sb.Append($" DEFAULT {def}");
+        }
+        if (domain.NotNull)
+        {
+            sb.Append(" NOT NULL");
+        }
+        foreach (var check in domain.Checks)
+        {
+            sb.Append($""" CONSTRAINT "{check.Name}" CHECK ({check.Expression})""");
+        }
+        return sb.ToString();
+    }
+
+    // A domain's base type cannot be altered in place (Postgres has no ALTER DOMAIN … TYPE), so a base-type change
+    // drops + recreates — re-issuing the comment the drop discarded. Fails loudly if a column still uses the domain.
+    private static IEnumerable<SqlStatement> BuildRecreateDomain(RecreateDomain x)
+    {
+        yield return new SqlStatement($"DROP DOMAIN \"{x.SchemaName}\".\"{x.Domain.Name}\"");
+        yield return new SqlStatement(BuildCreateDomain(x.SchemaName, x.Domain));
+        if (x.Domain.Comment is { } comment)
+        {
+            yield return new SqlStatement($"""COMMENT ON DOMAIN "{x.SchemaName}"."{x.Domain.Name}" IS $comment${comment}$comment$""");
+        }
+    }
+
+    // CREATE TRIGGER name {BEFORE|AFTER|INSTEAD OF} {event [OR …]} ON s.t FOR EACH {ROW|STATEMENT}
+    //   [WHEN (cond)] EXECUTE FUNCTION fn(args)
+    private static string BuildCreateTrigger(CreateTrigger x)
+    {
+        var t = x.Trigger;
+        var sb = new StringBuilder(
+            $"""CREATE TRIGGER "{t.Name}" {TriggerTimingText(t.Timing)} {TriggerEventsText(t)} ON "{x.SchemaName}"."{x.TableName}" FOR EACH {(t.Level == TriggerLevel.Row ? "ROW" : "STATEMENT")}""");
+        if (t.When is { } when)
+        {
+            sb.Append($" WHEN ({when})");
+        }
+        sb.Append($" EXECUTE FUNCTION {t.Function}({t.FunctionArguments ?? string.Empty})");
+        return sb.ToString();
+    }
+
+    private static string TriggerTimingText(TriggerTiming timing) => timing switch
+    {
+        TriggerTiming.Before => "BEFORE",
+        TriggerTiming.After => "AFTER",
+        TriggerTiming.InsteadOf => "INSTEAD OF",
+        _ => throw new ArgumentOutOfRangeException(nameof(timing), timing, "Unknown trigger timing."),
+    };
+
+    private static string TriggerEventsText(Trigger trigger)
+    {
+        var parts = new List<string>(4);
+        if (trigger.Events.HasFlag(TriggerEvent.Insert))
+        {
+            parts.Add("INSERT");
+        }
+        if (trigger.Events.HasFlag(TriggerEvent.Update))
+        {
+            parts.Add(trigger.UpdateOfColumns.Count > 0 ? $"UPDATE OF {ColList(trigger.UpdateOfColumns)}" : "UPDATE");
+        }
+        if (trigger.Events.HasFlag(TriggerEvent.Delete))
+        {
+            parts.Add("DELETE");
+        }
+        if (trigger.Events.HasFlag(TriggerEvent.Truncate))
+        {
+            parts.Add("TRUNCATE");
+        }
+        return string.Join(" OR ", parts);
+    }
+
+    private static string BuildCreateExtension(CreateExtension x)
+    {
+        var sql = $"CREATE EXTENSION IF NOT EXISTS \"{x.Extension.Name}\"";
+        return x.Extension.Version is { } version ? $"{sql} VERSION '{EscapeLiteral(version)}'" : sql;
+    }
+
+    private static string ViewKind(bool isMaterialized) => isMaterialized ? "MATERIALIZED VIEW" : "VIEW";
+
+    private static string RoutineKeyword(RoutineKind kind) => kind == RoutineKind.Procedure ? "PROCEDURE" : "FUNCTION";
 
     private static long DefaultStart(SequenceOptions options) =>
         (options.IncrementBy ?? 1) > 0 ? options.MinValue ?? 1 : options.MaxValue ?? -1;

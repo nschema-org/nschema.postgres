@@ -1,6 +1,31 @@
 using NSchema.Plan.Model;
+using NSchema.Plan.Model.Columns;
+using NSchema.Plan.Model.CompositeTypes;
+using NSchema.Plan.Model.Constraints;
+using NSchema.Plan.Model.Domains;
+using NSchema.Plan.Model.Enums;
+using NSchema.Plan.Model.Extensions;
+using NSchema.Plan.Model.Indexes;
+using NSchema.Plan.Model.Routines;
+using NSchema.Plan.Model.Schemas;
+using NSchema.Plan.Model.Sequence;
+using NSchema.Plan.Model.Tables;
+using NSchema.Plan.Model.Triggers;
+using NSchema.Plan.Model.Views;
 using NSchema.Postgres.Sql;
-using NSchema.Schema.Model;
+using NSchema.Schema.Model.Columns;
+using NSchema.Schema.Model.CompositeTypes;
+using NSchema.Schema.Model.Constraints;
+using NSchema.Schema.Model.Domains;
+using NSchema.Schema.Model.Enums;
+using NSchema.Schema.Model.Extensions;
+using NSchema.Schema.Model.Indexes;
+using NSchema.Schema.Model.Routines;
+using NSchema.Schema.Model.Scripts;
+using NSchema.Schema.Model.Sequences;
+using NSchema.Schema.Model.Tables;
+using NSchema.Schema.Model.Triggers;
+using NSchema.Schema.Model.Views;
 using NSchema.Sql;
 
 namespace NSchema.Postgres.Tests.Sql;
@@ -73,6 +98,20 @@ public sealed class PostgresSqlGeneratorSnapshotTests
             OldOptions: new IdentityOptions(StartWith: 1, MinValue: 1, IncrementBy: 1),
             NewOptions: new IdentityOptions(StartWith: 500, MinValue: 100, IncrementBy: 2)));
 
+    [Fact]
+    public Task GeneratedColumnOperations() => VerifyPlan(
+        new CreateTable("public", new Table("boxes",
+            Columns:
+            [
+                new Column("w", SqlType.Int, IsNullable: false),
+                new Column("h", SqlType.Int, IsNullable: false),
+                new Column("area", SqlType.Int, GeneratedExpression: "w * h"),
+            ])),
+        new AddColumn("public", "boxes", new Column("perimeter", SqlType.Int, GeneratedExpression: "2 * (w + h)")),
+        // Change the expression in place (SET EXPRESSION), then drop the generation (DROP EXPRESSION).
+        new SetColumnGenerated("public", "boxes", "area", "w * h", "w * h * 2"),
+        new SetColumnGenerated("public", "boxes", "area", "w * h * 2", null));
+
     // ── Keys, indexes and constraints ───────────────────────────────────────────
 
     [Fact]
@@ -91,7 +130,33 @@ public sealed class PostgresSqlGeneratorSnapshotTests
     public Task IndexOperations() => VerifyPlan(
         new CreateIndex("public", "users", new TableIndex("idx_users_email", ["email"], IsUnique: true)),
         new CreateIndex("public", "users", new TableIndex("idx_users_active", ["created_at"], Predicate: "notes IS NOT NULL")),
+        // An access method (USING), a covering INCLUDE, descending / nulls ordering, and an expression key.
+        new CreateIndex("public", "users", new TableIndex("idx_users_tags", ["tags"], Method: "gin")),
+        new CreateIndex("public", "users", new TableIndex("idx_users_recent",
+            [new IndexColumn("created_at", Sort: IndexSort.Descending, Nulls: IndexNulls.Last), new IndexColumn("lower(email)", IsExpression: true)],
+            Include: ["id", "notes"])),
         new DropIndex("public", "users", "idx_users_email"));
+
+    [Fact]
+    public Task ExclusionConstraintOperations() => VerifyPlan(
+        new AddExclusionConstraint("public", "bookings", new ExclusionConstraint("no_overlap",
+            [new ExclusionElement("room", "="), new ExclusionElement("during", "&&")], Method: "gist", Predicate: "room > 0")),
+        // An expression element is parenthesised.
+        new AddExclusionConstraint("public", "events", new ExclusionConstraint("no_clash",
+            [new ExclusionElement("tstzrange(starts, ends)", "&&", IsExpression: true)], Method: "gist")),
+        new DropExclusionConstraint("public", "bookings", "no_overlap"));
+
+    // ── Triggers ──────────────────────────────────────────────────────────────
+
+    [Fact]
+    public Task TriggerOperations() => VerifyPlan(
+        new CreateTrigger("public", "users", new Trigger("users_audit", TriggerTiming.After,
+            TriggerEvent.Insert | TriggerEvent.Update, "public.log_change", TriggerLevel.Row,
+            UpdateOfColumns: ["email", "name"], When: "new.active", FunctionArguments: "'audit'")),
+        new CreateTrigger("public", "logs", new Trigger("logs_truncate", TriggerTiming.Before,
+            TriggerEvent.Truncate, "public.on_truncate", TriggerLevel.Statement)),
+        new SetTriggerComment("public", "users", "users_audit", null, "audit changes"),
+        new DropTrigger("public", "users", "users_audit"));
 
     // ── Views ─────────────────────────────────────────────────────────────────
 
@@ -102,6 +167,16 @@ public sealed class PostgresSqlGeneratorSnapshotTests
         new SetViewComment("public", "active_users", null, "Active users only"),
         new SetViewComment("public", "active_users", "Active users only", null),
         new DropView("public", "active_users"));
+
+    [Fact]
+    public Task MaterializedViewOperations() => VerifyPlan(
+        // A materialized view: CREATE MATERIALIZED VIEW (never CREATE OR REPLACE), an index on it (a plain
+        // CreateIndex), and the MATERIALIZED variants of rename/comment/drop.
+        new CreateView("public", new View("daily_totals", "SELECT date, sum(amount) AS total FROM public.sales GROUP BY date", IsMaterialized: true)),
+        new CreateIndex("public", "daily_totals", new TableIndex("idx_daily_totals_date", ["date"], IsUnique: true)),
+        new RenameView("public", "legacy_totals", "daily_totals", IsMaterialized: true),
+        new SetViewComment("public", "daily_totals", null, "Daily rollup", IsMaterialized: true),
+        new DropView("public", "daily_totals", IsMaterialized: true));
 
     // ── Enums ──────────────────────────────────────────────────────────────────
 
@@ -115,6 +190,36 @@ public sealed class PostgresSqlGeneratorSnapshotTests
         new SetEnumComment("public", "order_status", null, "Order lifecycle"),
         new SetEnumComment("public", "order_status", "Order lifecycle", null),
         new DropEnum("public", "order_status"));
+
+    // ── Composite types ──────────────────────────────────────────────────────
+
+    [Fact]
+    public Task CompositeTypeOperations() => VerifyPlan(
+        new CreateCompositeType("public", new CompositeType("address",
+            [new CompositeField("street", SqlType.Text), new CompositeField("zip", SqlType.Int)])),
+        new AddCompositeField("public", "address", new CompositeField("country", SqlType.Text)),
+        new AlterCompositeFieldType("public", "address", "zip", SqlType.Int, SqlType.VarChar(10)),
+        new DropCompositeField("public", "address", "country"),
+        new RenameCompositeType("public", "old_address", "address"),
+        new SetCompositeTypeComment("public", "address", null, "a postal address"),
+        new DropCompositeType("public", "address"));
+
+    // ── Domains ────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public Task DomainOperations() => VerifyPlan(
+        new CreateDomain("public", new Domain("email", SqlType.Text, Default: "'n/a'", NotNull: true,
+            Checks: [new CheckConstraint("email_fmt", "VALUE ~ '@'")])),
+        new AlterDomainDefault("public", "email", "'n/a'", "'unknown'"),
+        new AlterDomainDefault("public", "email", "'unknown'", null),
+        new AlterDomainNotNull("public", "email", false),
+        new AddDomainCheck("public", "email", new CheckConstraint("email_len", "length(VALUE) > 3")),
+        new DropDomainCheck("public", "email", "email_fmt"),
+        // A base-type change recreates (drop + create, re-issuing the comment).
+        new RecreateDomain("public", new Domain("code", SqlType.VarChar(8), Comment: "a code")),
+        new RenameDomain("public", "old_code", "code"),
+        new SetDomainComment("public", "email", null, "an email"),
+        new DropDomain("public", "email"));
 
     // ── Sequences ──────────────────────────────────────────────────────────────
 
@@ -132,34 +237,46 @@ public sealed class PostgresSqlGeneratorSnapshotTests
         new SetSequenceComment("public", "invoice_id", "Invoice numbers", null),
         new DropSequence("public", "invoice_id"));
 
+    // ── Extensions ────────────────────────────────────────────────────────────
+
+    [Fact]
+    public Task ExtensionOperations() => VerifyPlan(
+        new CreateExtension(new Extension("citext")),
+        new CreateExtension(new Extension("postgis", Version: "3.4")),
+        // A hyphenated name must be quoted.
+        new CreateExtension(new Extension("uuid-ossp")),
+        new AlterExtension("postgis", "3.4", "3.5"),
+        new SetExtensionComment("citext", null, "case-insensitive text"),
+        new DropExtension("postgis"));
+
     // ── Functions ─────────────────────────────────────────────────────────────
 
     [Fact]
     public Task FunctionOperations() => VerifyPlan(
-        new CreateFunction("public", new Function("active_user_count", "",
+        new CreateRoutine("public", new Routine("active_user_count", RoutineKind.Function, "",
             "RETURNS integer LANGUAGE sql AS $$ SELECT count(*) FROM public.users WHERE active $$")),
-        new RenameFunction("public", "user_count", "active_user_count"),
+        new RenameRoutine("public", "user_count", "active_user_count", RoutineKind.Function),
         // A signature change: drop + recreate, re-issuing the comment the drop discarded.
-        new RecreateFunction("public", new Function("add_numbers", "a integer, b integer, c integer DEFAULT 0",
+        new RecreateRoutine("public", new Routine("add_numbers", RoutineKind.Function, "a integer, b integer, c integer DEFAULT 0",
             "RETURNS integer LANGUAGE sql AS $$ SELECT a + b + c $$", Comment: "Adds numbers")),
-        new RecreateFunction("public", new Function("subtract_numbers", "a integer, b integer",
+        new RecreateRoutine("public", new Routine("subtract_numbers", RoutineKind.Function, "a integer, b integer",
             "RETURNS integer LANGUAGE sql AS $$ SELECT a - b $$")),
-        new SetFunctionComment("public", "active_user_count", null, "Count of active users"),
-        new SetFunctionComment("public", "active_user_count", "Count of active users", null),
-        new DropFunction("public", "active_user_count"));
+        new SetRoutineComment("public", "active_user_count", null, "Count of active users", RoutineKind.Function),
+        new SetRoutineComment("public", "active_user_count", "Count of active users", null, RoutineKind.Function),
+        new DropRoutine("public", "active_user_count", RoutineKind.Function));
 
     // ── Procedures ────────────────────────────────────────────────────────────
 
     [Fact]
     public Task ProcedureOperations() => VerifyPlan(
-        new CreateProcedure("public", new Procedure("archive_users", "cutoff date",
+        new CreateRoutine("public", new Routine("archive_users", RoutineKind.Procedure, "cutoff date",
             "LANGUAGE sql AS $$ DELETE FROM public.users WHERE created_at < cutoff $$")),
-        new RenameProcedure("public", "purge_users", "archive_users"),
-        new RecreateProcedure("public", new Procedure("archive_users", "cutoff timestamptz",
+        new RenameRoutine("public", "purge_users", "archive_users", RoutineKind.Procedure),
+        new RecreateRoutine("public", new Routine("archive_users", RoutineKind.Procedure, "cutoff timestamptz",
             "LANGUAGE sql AS $$ DELETE FROM public.users WHERE created_at < cutoff $$", Comment: "Archives stale users")),
-        new SetProcedureComment("public", "archive_users", null, "Archive job"),
-        new SetProcedureComment("public", "archive_users", "Archive job", null),
-        new DropProcedure("public", "archive_users"));
+        new SetRoutineComment("public", "archive_users", null, "Archive job", RoutineKind.Procedure),
+        new SetRoutineComment("public", "archive_users", "Archive job", null, RoutineKind.Procedure),
+        new DropRoutine("public", "archive_users", RoutineKind.Procedure));
 
     // ── Comments ────────────────────────────────────────────────────────────────
 
