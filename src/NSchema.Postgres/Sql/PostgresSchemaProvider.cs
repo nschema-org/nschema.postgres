@@ -132,10 +132,10 @@ internal sealed class PostgresSchemaProvider(NpgsqlDataSource dataSource) : ISch
                 seq.seqincrement AS identity_increment,
                 CASE WHEN c.is_generated = 'ALWAYS' THEN c.generation_expression END AS generation_expression
             FROM information_schema.columns c
+            LEFT JOIN pg_namespace    n  ON n.nspname   = c.table_schema
             LEFT JOIN pg_class        t  ON t.relname   = c.table_name
+                                        AND t.relnamespace = n.oid
                                         AND t.relkind   = 'r'
-            LEFT JOIN pg_namespace    n  ON n.oid        = t.relnamespace
-                                        AND n.nspname   = c.table_schema
             LEFT JOIN pg_attribute    a  ON a.attrelid  = t.oid
                                         AND a.attname   = c.column_name
             LEFT JOIN pg_depend       d  ON d.refobjid  = t.oid
