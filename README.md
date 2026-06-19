@@ -1,88 +1,26 @@
-# ![NSchema](https://raw.githubusercontent.com/nschema-org/NSchema.Core/main/assets/nschema-logo-horizontal.png)
+# ![NSchema](https://raw.githubusercontent.com/nschema-org/NSchema.Docs/main/assets/nschema-logo-horizontal.png)
 
 [![NSchema.Postgres](https://github.com/nschema-org/NSchema.Postgres/actions/workflows/cicd.yml/badge.svg)](https://github.com/nschema-org/NSchema.Postgres/actions/workflows/cicd.yml)
 
 # NSchema.Postgres
 
-PostgreSQL provider for [NSchema](https://github.com/nschema-org/NSchema.Core), the declarative database schema migration library for .NET.
+PostgreSQL provider for [NSchema](https://github.com/nschema-org/NSchema), the declarative database schema migration tool for .NET. It plugs PostgreSQL introspection and DDL generation into NSchema, and adds Postgres-only `SqlType` helpers (`citext`, `jsonb`).
 
-This package plugs PostgreSQL-specific implementations of NSchema's `ISchemaProvider` (live-database introspection) and `ISqlPlanner` (DDL generation) into your application, and contributes Postgres-only `SqlType` helpers.
+Most users should use the [NSchema CLI](https://github.com/nschema-org/NSchema), which already includes this provider. Add this package directly only when [embedding the engine](https://nschema.dev/library/embedding/) in your own application.
 
-## Getting started
+## Installation
 
-Install the core package and this provider:
-
-```bash
-dotnet add package NSchema
+```sh
+dotnet add package NSchema.Core
 dotnet add package NSchema.Postgres
 ```
 
-Register Postgres against an `NSchemaApplicationBuilder`:
+## Documentation
 
-```csharp
-using NSchema;
-using NSchema.Postgres;
+Full documentation lives at **[nschema.dev](https://nschema.dev)**:
 
-var builder = NSchemaApplication.CreateBuilder(args);
-
-builder
-    .AddSchemasFromAssemblyContaining<Program>()
-    .UseCurrentSchemaPostgres(connectionString);
-
-var app = builder.Build();
-await app.Apply();
-```
-
-On startup NSchema introspects the database through this provider, diffs it against your declared schema, and applies the resulting plan.
-
-## Configuration
-
-`UseCurrentSchemaPostgres` has four overloads. The three connection-aware overloads register an `NpgsqlDataSource` for you (via `AddNpgsqlDataSource`) and wire up the current schema provider and SQL planner; the no-arg overload assumes you've already registered an `NpgsqlDataSource` yourself.
-
-```csharp
-// 1. Connection string.
-builder.UseCurrentSchemaPostgres("Host=localhost;Database=app;Username=postgres;Password=postgres");
-
-// 2. Configure the data source builder directly.
-builder.UseCurrentSchemaPostgres(b => b
-    .EnableDynamicJson()
-    .UseLoggerFactory(loggerFactory)
-);
-
-// 3. As above, with access to the IServiceProvider.
-builder.UseCurrentSchemaPostgres((sp, b) => b.UseLoggerFactory(sp.GetRequiredService<ILoggerFactory>()));
-
-// 4. Bring your own data source.
-builder.Services.AddNpgsqlDataSource(connectionString);
-builder.UseCurrentSchemaPostgres();
-```
-
-## Postgres-specific types
-
-`SqlTypePostgresExtensions` adds Postgres-only members to `SqlType`:
-
-| Member           | Postgres type | Notes                                                   |
-|------------------|---------------|---------------------------------------------------------|
-| `SqlType.Citext` | `citext`      | Case-insensitive text. Requires the `citext` extension. |
-| `SqlType.Jsonb`  | `jsonb`       | Binary JSON.                                            |
-
-```csharp
-users.Column("email", SqlType.Citext).NotNull();
-users.Column("metadata", SqlType.Jsonb);
-```
-
-`citext` requires `CREATE EXTENSION citext;` in the target database — NSchema.Postgres does not create extensions for you.
-
-## Supported schema objects
-
-The introspector reads, and the planner emits DDL for:
-
-- Schemas (including comments and `GRANT`s on the schema itself)
-- Tables (including comments and table-level `GRANT`s)
-- Columns (types, nullability, defaults, comments)
-- Primary keys
-- Foreign keys
-- Indexes, including unique indexes and index comments
+- [PostgreSQL provider](https://nschema.dev/providers/postgres/) — configuration, library usage, and Postgres-specific types
+- [Embedding the engine](https://nschema.dev/library/embedding/)
 
 ## License
 
