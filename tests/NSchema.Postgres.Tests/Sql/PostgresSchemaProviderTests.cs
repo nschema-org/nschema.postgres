@@ -1042,4 +1042,45 @@ public sealed class PostgresSchemaProviderTests(PostgresContainerFixture fixture
         citext.Version.ShouldNotBeNull();
         schema.Extensions.ShouldNotContain(e => e.Name == "plpgsql");
     }
+
+    // ── Same table name across schemas ────────────────────────────────────────
+
+    // Regression: the columns query joined pg_class on relname alone (not namespace), so a table name shared by
+    // two schemas matched both pg_class rows and fanned every column row out once per schema — columns appeared
+    // duplicated in each table. Each table must report only its own columns.
+    [Fact]
+    public async Task GetSchema_SameTableNameInDifferentSchemas_DoesNotDuplicateColumns()
+    {
+        // Arrange
+        var other = $"test_{Guid.NewGuid():N}";
+        await Exec($"CREATE SCHEMA \"{other}\"");
+        try
+        {
+            await Exec($"""
+                CREATE TABLE "{_schema}".users (
+                    id   INTEGER NOT NULL,
+                    name TEXT    NOT NULL
+                )
+                """);
+            await Exec($"""
+                CREATE TABLE "{other}".users (
+                    code   INTEGER NOT NULL,
+                    region TEXT    NOT NULL
+                )
+                """);
+
+            // Act
+            var model = await _sut.GetSchema([_schema, other], TestContext.Current.CancellationToken);
+
+            // Assert
+            var primary = model.Schemas.Single(s => s.Name == _schema).Tables.Single(t => t.Name == "users");
+            var secondary = model.Schemas.Single(s => s.Name == other).Tables.Single(t => t.Name == "users");
+            primary.Columns.Select(c => c.Name).ShouldBe(["id", "name"]);
+            secondary.Columns.Select(c => c.Name).ShouldBe(["code", "region"]);
+        }
+        finally
+        {
+            await Exec($"DROP SCHEMA IF EXISTS \"{other}\" CASCADE");
+        }
+    }
 }
