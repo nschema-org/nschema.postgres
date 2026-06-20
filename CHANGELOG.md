@@ -10,13 +10,12 @@ This package uses **lockstep major versioning** with the core NSchema package: `
 
 As a consequence, breaking changes that are specific to this provider (rather than the core API) are signalled by a **minor version bump** rather than a major one, and called out explicitly in this changelog.
 
-## [Unreleased]
+## [3.0.0] - 2026-06-20
 
 ### Added
 
-- `NSchemaApplicationBuilder.AddPostgresGenerator` extension for registering only the Postrges SQL generator and not the provider.
-- Enum type support, matching NSchema.Core 3.0.0's enum model. Introspection reads enum types and their value order from `pg_type`/`pg_enum` (plus comments); the generator emits `CREATE TYPE … AS ENUM`, `DROP TYPE`, `ALTER TYPE … RENAME TO`, `COMMENT ON TYPE`, and anchored `ALTER TYPE … ADD VALUE [BEFORE|AFTER …]`. `ADD VALUE` statements are marked to run outside the migration transaction (Postgres forbids using a value added in the same uncommitted transaction); the executor carves them out in order, so later statements that use the value still run after it.
-- Standalone sequence support. Introspection reads sequences from `pg_sequence` — excluding column-owned sequences (identity, serial, and `OWNED BY`, via `pg_depend` deptype `'i'`/`'a'`) — and folds Postgres engine defaults to `null` so a bare `CREATE SEQUENCE` declaration round-trips with no phantom drift. The generator emits `CREATE SEQUENCE` with only the declared options, `DROP SEQUENCE`, `ALTER SEQUENCE … RENAME TO`, `COMMENT ON SEQUENCE`, and a delta-based `ALTER SEQUENCE` where an option removed from the declaration resets explicitly to its engine default. Note: a desired schema that explicitly declares an engine default (e.g. `START 1` on an ascending sequence) will show drift against the normalized form — omit the option instead.
+- `NSchemaApplicationBuilder.UseCurrentSchemaPostgres` extension for registering only the Postgres SQL generator and not the provider.
+- Full coverage of NSchema.Core 3.0.0's domain model.
 
 ### Changed
 
@@ -44,3 +43,7 @@ First stable release of the PostgreSQL provider for NSchema, tracking the 1.0 re
 - `PostgresSqlPlanner` — `ISqlPlanner` implementation that translates an NSchema `MigrationPlan` into PostgreSQL DDL.
 - `SqlType.Citext` and `SqlType.Jsonb` Postgres-specific type helpers on `SqlType`.
 - SourceLink and symbol packages (`.snupkg`) published alongside the main package for source-level debugging.
+
+[3.0.0]: https://github.com/nschema-org/NSchema.Postgres/compare/v2.0.0...v3.0.0
+[2.0.0]: https://github.com/nschema-org/NSchema.Postgres/compare/v1.0.0...v2.0.0
+[1.0.0]: https://github.com/nschema-org/NSchema.Postgres/releases/tag/v1.0.0
