@@ -9,7 +9,7 @@
       RunOutsideTransaction: false
     },
     {
-      Sql: DROP SCHEMA "commerce" CASCADE,
+      Sql: DROP SCHEMA "commerce",
       RunOutsideTransaction: false
     }
   ],
