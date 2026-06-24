@@ -14,10 +14,8 @@ using NSchema.Plan.Model.Tables;
 using NSchema.Plan.Model.Triggers;
 using NSchema.Plan.Model.Views;
 using NSchema.Schema.Model.Columns;
-using NSchema.Schema.Model.CompositeTypes;
 using NSchema.Schema.Model.Constraints;
 using NSchema.Schema.Model.Domains;
-using NSchema.Schema.Model.Extensions;
 using NSchema.Schema.Model.Indexes;
 using NSchema.Schema.Model.Routines;
 using NSchema.Schema.Model.Sequences;
@@ -55,7 +53,7 @@ internal sealed class PostgresSqlGenerator : ISqlGenerator
     private static string GenerateSql(MigrationAction action) => action switch
     {
         CreateSchema x => $"CREATE SCHEMA IF NOT EXISTS \"{x.SchemaName}\"",
-        DropSchema x => $"""DROP SCHEMA "{x.SchemaName}" CASCADE""",
+        DropSchema x => $"DROP SCHEMA \"{x.SchemaName}\"",
         RenameSchema x => $"ALTER SCHEMA \"{x.OldName}\" RENAME TO \"{x.NewName}\"",
         CreateTable x => BuildCreateTable(x),
         DropTable x => $"DROP TABLE \"{x.SchemaName}\".\"{x.TableName}\"",

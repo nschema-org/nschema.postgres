@@ -91,6 +91,27 @@ public sealed class PostgresSqlGeneratorTests(PostgresContainerFixture fixture) 
     }
 
     [Fact]
+    public async Task DropSchema_AfterDroppingItsTable_RemovesANonEmptySchema()
+    {
+        // Destroy now drops a schema's objects explicitly before the schema itself, so DROP SCHEMA no longer needs
+        // CASCADE. Prove the sequence works against a real database: a schema holding a table is torn down by a
+        // DROP TABLE followed by a plain (non-cascading) DROP SCHEMA.
+        var name = $"test_{Guid.NewGuid():N}";
+        await Exec($"""CREATE SCHEMA "{name}" """);
+        await Exec($"""CREATE TABLE "{name}"."widgets" (id integer)""");
+
+        // Act
+        await _executor.Execute(
+            _generator.Generate(new MigrationPlan([new DropTable(name, "widgets"), new DropSchema(name)], [], [])),
+            TestContext.Current.CancellationToken);
+
+        // Assert
+        var exists = await ScalarBool(
+            $"SELECT COUNT(*) > 0 FROM information_schema.schemata WHERE schema_name = '{name}'");
+        exists.ShouldBeFalse();
+    }
+
+    [Fact]
     public async Task RenameSchema_RenamesSchemaInDatabase()
     {
         // Arrange

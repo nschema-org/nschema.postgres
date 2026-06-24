@@ -10,6 +10,12 @@ This package uses **lockstep major versioning** with the core NSchema package: `
 
 As a consequence, breaking changes that are specific to this provider (rather than the core API) are signalled by a **minor version bump** rather than a major one, and called out explicitly in this changelog.
 
+## [3.0.1] - 2026-02-24
+
+### Fixed
+
+- The Postgres provider will now no-longer call `CASCADE` its `DROP SCHEMA` actions, to behave more consistently with other providers that do not support it.
+
 ## [3.0.0] - 2026-06-20
 
 ### Added
