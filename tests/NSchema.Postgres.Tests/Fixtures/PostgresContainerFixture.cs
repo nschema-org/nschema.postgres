@@ -10,10 +10,17 @@ public sealed class PostgresContainerFixture : IAsyncLifetime
 
     public NpgsqlDataSource DataSource { get; private set; } = null!;
 
+    /// <summary>
+    /// The full connection string (including the password, which <see cref="NpgsqlDataSource.ConnectionString"/>
+    /// redacts) — for tests that hand a connection string to the plugin's <c>Configure</c>.
+    /// </summary>
+    public string ConnectionString { get; private set; } = null!;
+
     public async ValueTask InitializeAsync()
     {
         await _container.StartAsync();
-        DataSource = NpgsqlDataSource.Create(_container.GetConnectionString());
+        ConnectionString = _container.GetConnectionString();
+        DataSource = NpgsqlDataSource.Create(ConnectionString);
 
         await using var conn = await DataSource.OpenConnectionAsync();
         await using var cmd = conn.CreateCommand();
