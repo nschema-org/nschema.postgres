@@ -47,6 +47,26 @@ public sealed class PostgresPluginTests : IDisposable
         => _sut.GetScaffoldTemplate(new ScaffoldContext()).ShouldContain("PROVIDER postgres");
 
     [Fact]
+    public void GetScaffoldTemplate_WithVersion_PinsIt()
+        => _sut.GetScaffoldTemplate(new ScaffoldContext { Version = "9.9.9" }).ShouldContain("version           = '9.9.9',");
+
+    [Fact]
+    public void GetScaffoldTemplate_WithoutVersion_OmitsVersionAttribute()
+        // The host always resolves a version for scaffolding; absent one, the block omits the (required) attribute
+        // rather than emitting an empty pin.
+        => _sut.GetScaffoldTemplate(new ScaffoldContext()).ShouldNotContain("version");
+
+    [Fact]
+    public void GetSampleSchema_ScaffoldsANamedSchema()
+    {
+        // Unlike SQLite (main), Postgres scaffolds a dedicated schema.
+        var schema = _sut.GetSampleSchema();
+
+        schema.ShouldContain("CREATE SCHEMA app;");
+        schema.ShouldContain("CREATE TABLE app.widgets");
+    }
+
+    [Fact]
     public void Configure_ValidConnectionString_SucceedsAndRegistersProvider()
     {
         // Arrange
