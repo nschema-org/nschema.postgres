@@ -12,18 +12,39 @@ public sealed class PostgresPlugin : INSchemaProviderPlugin
     private const string EnvUsername = "NSCHEMA_POSTGRES_USERNAME";
     private const string EnvPassword = "NSCHEMA_POSTGRES_PASSWORD";
 
-    private const string Template =
-        """
-        PROVIDER postgres (
-          connection_string = ''
-        );
-        """;
-
     /// <inheritdoc />
     public string Label => "postgres";
 
     /// <inheritdoc />
-    public string GetScaffoldTemplate(ScaffoldContext context) => Template;
+    public string GetScaffoldTemplate(ScaffoldContext context)
+    {
+        var lines = new List<string> { "PROVIDER postgres (" };
+        if (context.Version is { } version)
+        {
+            lines.Add($"  version           = '{version}',");
+        }
+
+        lines.Add($"  -- Prefer the {EnvConnectionString} environment variable, which");
+        lines.Add("  -- overrides the value below.");
+        lines.Add("  connection_string = ''");
+        lines.Add("  -- Credentials may be supplied separately from the connection string (e.g. from");
+        lines.Add($"  -- a secret store) via {EnvUsername} / {EnvPassword}.");
+        lines.Add("  -- They override any user/password embedded in connection_string.");
+        lines.Add(");");
+        return string.Join("\n", lines);
+    }
+
+    /// <inheritdoc />
+    public string GetSampleSchema() =>
+        """
+        CREATE SCHEMA app;
+
+        CREATE TABLE app.widgets (
+          id   bigint NOT NULL,
+          name text,
+          CONSTRAINT widgets_pkey PRIMARY KEY (id)
+        );
+        """;
 
     /// <inheritdoc />
     public PluginConfigureResult Configure(NSchemaApplicationBuilder builder, ConfigBlock block)
