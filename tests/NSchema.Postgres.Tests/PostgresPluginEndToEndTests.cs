@@ -1,5 +1,7 @@
 using NSchema.Configuration;
 using NSchema.Operations.Apply;
+using NSchema.Operations.Plan;
+using NSchema.Sql.Model;
 using NSchema.Postgres.Sql;
 using NSchema.Postgres.Tests.Fixtures;
 
@@ -47,7 +49,7 @@ public sealed class PostgresPluginEndToEndTests(PostgresContainerFixture fixture
             );
             """, TestContext.Current.CancellationToken);
 
-        var builder = NSchemaApplication.CreateBuilder(new NSchemaApplicationOptions { ExceptionBehavior = ExceptionBehavior.Throw });
+        var builder = NSchemaApplication.CreateBuilder();
         var configured = new PostgresPlugin().Configure(builder, new ConfigBlock("provider", "postgres", new Dictionary<string, ConfigValue>
         {
             ["connection_string"] = ConfigValue.OfString(_fixture.ConnectionString),
@@ -57,8 +59,10 @@ public sealed class PostgresPluginEndToEndTests(PostgresContainerFixture fixture
         builder.AddDdlSchemas(_projectDir);
         using var app = builder.Build();
 
-        // Act — a real apply through the plugin-wired provider.
-        await app.Apply(new ApplyArguments { Schemas = [_schema] }, TestContext.Current.CancellationToken);
+        // Act — a real plan + apply through the plugin-wired provider.
+        var planResult = await app.Operations.Plan(new PlanArguments { Schemas = [_schema], Target = PlanTarget.Live }, TestContext.Current.CancellationToken);
+        planResult.IsSuccess.ShouldBeTrue();
+        await app.Operations.Apply(new ApplyArguments { Sql = planResult.Value!.Sql ?? new SqlPlan([]) }, TestContext.Current.CancellationToken);
 
         // Assert — the table really exists, read back via a fresh introspection.
         var live = await new PostgresSchemaProvider(_fixture.DataSource).GetSchema([_schema], TestContext.Current.CancellationToken);
