@@ -1,9 +1,9 @@
 using NSchema.Configuration;
 using NSchema.Operations.Apply;
 using NSchema.Operations.Plan;
-using NSchema.Sql.Model;
 using NSchema.Postgres.Sql;
 using NSchema.Postgres.Tests.Fixtures;
+using NSchema.Sql.Model;
 
 namespace NSchema.Postgres.Tests;
 
